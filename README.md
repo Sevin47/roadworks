@@ -5,16 +5,14 @@ A shared, real-time browser game for WVDOT staff. Every work order on the board 
 network**. You play a county manager: dispatch crews, and close out the day's work
 before tomorrow's report replaces it.
 
-## Run it
+There are two ways to run it, and they share the same data pipeline:
 
-```bash
-npm install
-npm start
-```
-
-Then open `http://localhost:8080`. The console also prints a LAN address —
-share that one with coworkers on the same network and you're all playing the
-same board.
+| | **Hosted** (recommended) | **LAN** |
+| --- | --- | --- |
+| What runs | A static site + Supabase. Nothing of yours stays up. | One Node process on your machine. |
+| Who can play | Anyone with the link. | Anyone on your network, while your laptop is on. |
+| Setup | ~15 min once (SQL + two keys + a GitHub secret). | `npm start`. |
+| Where to look | [`web/`](web), [`supabase/schema.sql`](supabase/schema.sql), [`ingest/`](ingest) | [`server/`](server), [`public/`](public) |
 
 ## Where the data comes from
 
@@ -29,11 +27,11 @@ Route-type tokens map to LRS sign systems as `I→1, US→2, WV→3, CO→4, HA�
 Because the county heading on a report is the **maintenance HQ** — crews routinely
 work over the county line — a row that doesn't resolve inside its home county is
 retried statewide on the same route number, preferring counties in the reporting
-district. On a typical day ~90% of rows land on exact milepoint geometry; a few
-percent fall outside the mapped extent of a recently re-measured county route and
-are drawn dashed with a "full route shown" note.
+district. A representative day: **625 rows parsed, 565 on exact milepoint geometry,
+58 approximate, 2 unresolved.** The approximate ones fall outside the mapped extent
+of a recently re-measured county route; they're drawn dashed with a note.
 
-Check coverage for today without launching the game:
+Check coverage for today without writing anything anywhere:
 
 ```bash
 npm run refresh
@@ -46,7 +44,7 @@ npm run refresh
 - **Dispatch crews.** Click a segment on the map or a card in the queue. Crews take
   real travel time from your county HQ, then start working.
 - **It's a crowd game.** Effort is measured in crew-seconds. `n` crews on one job
-  produce `n × (1 + 0.12·(n−1))` work per second (capped at 3×) — so a pile-on from
+  produce `n × (1 + 0.12·(n−1))` work per second, capped at 3× — so a pile-on from
   six coworkers finishes a job far faster than six people working alone. Everyone
   who contributed shares the XP and budget when it closes.
 - **Effort scales with the real work.** Category base plus per-mile cost from the
@@ -56,71 +54,116 @@ npm run refresh
   spawn on real route geometry during play, are worth extra XP, and expire if nobody
   responds. (These are generated for gameplay — the scheduled work orders are the
   real data.)
-- **New day, new board.** The server re-reads WV511 every 20 minutes. When the
-  reporting date changes, the board resets and today's leaderboard closes out.
-  Levels, lifetime XP and budget persist per player.
+- **New day, new board.** When WV511 posts a new reporting date the board resets and
+  the day's standings are frozen. Levels, lifetime XP and budget persist.
 
-Progress and player profiles live in `data/`; delete that folder for a clean slate.
+---
 
-## Hosting it so coworkers can play from anywhere
+# Hosted setup (static site + Supabase)
 
-LAN play needs nothing but `npm start`. To put it online — no laptop left
-running, scores that survive restarts — you need two pieces: **Supabase** for the
-data and **any always-on Node host** for the game loop. (Supabase alone can't run
-the game; the tick loop and WebSocket fan-out need a live process.)
+No server. The browser talks to Postgres directly; a scheduled GitHub Action does
+the once-a-day PDF work.
 
-**1. Supabase.** In your project's SQL editor, run [`supabase/schema.sql`](supabase/schema.sql).
-That creates three tables: `players` (lifetime XP, budget, level), `day_state`
-(the in-progress board, so a restart doesn't wipe everyone's day) and `day_scores`
-(frozen standings for each finished day). RLS is on with no public policies —
-the server talks to them with the service-role key and nothing is reachable from
-a browser.
+### Why there's no tick loop
 
-**2. The server.** Set two environment variables and it switches from JSON files
-to Postgres automatically:
+The original build ran a 1 Hz timer adding work units to every active job — which
+is why it needed a process to stay up. The hosted version stores each job's
+**banked progress plus the instant it was banked**, and derives the current value
+on read. Between crew arrivals the crowd rate is constant, so progress over any
+such span is exactly `rate × elapsed`; `settle_job()` walks the arrival events
+since the last checkpoint, banks each constant-rate span, and stops at the precise
+moment the job hits its effort target. Clients run the same integral locally to
+animate the bars, and ask Postgres to settle when their own clock says a job is
+done — Postgres then recomputes the whole thing itself, so a patched client can
+lie to its own screen and nothing more.
 
-```
-SUPABASE_URL=https://<your-project>.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=<service_role secret, not anon>
-```
+### 1. Supabase
 
-Locally, copy `.env.example` to `.env` — `npm start` picks it up. For hosting,
-[`render.yaml`](render.yaml) is a ready blueprint: on Render, **New → Blueprint**,
-point it at this repo, and paste those two values when prompted. Any host that
-runs Node and passes WebSockets works the same way (Railway, Fly.io, Fly Machines,
-a VM) — the only requirement is a long-lived process, so serverless/edge functions
-won't do.
+1. Create a free project.
+2. **SQL Editor** → paste all of [`supabase/schema.sql`](supabase/schema.sql) → Run.
+   The file is idempotent; re-paste it whenever it changes. It creates the tables,
+   RLS policies, every RPC, the `pg_cron` schedules and the Realtime publication.
+3. **Authentication → Providers → Anonymous sign-ins → enable.** This is what lets
+   coworkers join with just a name and county, no accounts.
+4. **Project Settings → API** — copy the **Project URL** and the **`anon`** key.
 
-Startup order is deliberate: the server restores the saved board from Supabase
-immediately, then reconciles against WV511 in the background, so a cold start
-doesn't strand players behind a 60-second geocoding pass. `SIGTERM` flushes state
-before the process dies.
+### 2. The daily ingest
 
-`GET /api/health` reports storage backend, reporting date and job count — Render's
-health check is already pointed at it.
+The one piece that genuinely needs Node: parsing ten PDFs and geolocating ~600 rows
+takes about a minute, so it runs once a day rather than continuously.
 
-> On Render's free tier the service sleeps after ~15 minutes with no traffic and
-> takes a few seconds to wake, which drops open WebSockets (the client reconnects
-> on its own). Because state lives in Supabase, nothing is lost. A paid instance
-> or a cheap always-on VM removes the nap.
+In your GitHub repo → **Settings → Secrets and variables → Actions**, add:
 
-## Layout
+- `SUPABASE_URL` — the Project URL
+- `SUPABASE_SERVICE_ROLE_KEY` — the **`service_role`** secret (not `anon`; this one
+  never touches a browser)
 
-```
-server/
-  index.js    HTTP + WebSocket server, broadcast loop, daily refresh timer
-  game.js     game state, tick loop, crews, scoring, incidents, day rollover
-  wv511.js    district-page scrape, PDF text extraction, report row parser
-  lrs.js      county lookup + milepoint-to-geometry clipping against WVDOT GIS
-  store.js    persistence: local JSON files, or Supabase when configured
-  config.js   endpoints and all game tuning constants
-  tools/      refresh.js (data coverage report), selftest.js (end-to-end check)
-public/       single-page client: Leaflet map, queue, crews, chat, leaderboard
-supabase/     schema.sql for the hosted setup
-render.yaml   one-click deploy blueprint
+[`.github/workflows/daily-report.yml`](.github/workflows/daily-report.yml) runs it
+three times each morning and can be triggered by hand from the **Actions** tab. Run
+it once now so the board isn't empty. Locally:
+
+```bash
+SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... node ingest/push.js
 ```
 
-## Verify a running server
+Re-running mid-day is safe: `job_state` is only created, never reset, so nobody
+loses progress they've already put in.
+
+### 3. The site
+
+Put your two **public** values into [`web/config.js`](web/config.js):
+
+```js
+window.WVDOT_CONFIG = {
+  SUPABASE_URL: 'https://your-project-ref.supabase.co',
+  SUPABASE_ANON_KEY: 'your-anon-public-key'
+};
+```
+
+The anon key is public by design — it ships in every browser that loads the page.
+RLS is the boundary, not secrecy: every table is read-only to clients and every
+mutation goes through a `security definer` RPC.
+
+`web/` is plain static files with no build step. Drag the folder onto
+[app.netlify.com/drop](https://app.netlify.com/drop), or connect the repo with
+publish directory `web` and no build command. Vercel, Cloudflare Pages and GitHub
+Pages all work the same way.
+
+### Data model
+
+| Table | Role |
+| --- | --- |
+| `game_day` | One row per ingested reporting date |
+| `jobs` | The immutable half of a work order — description, geometry, effort. Written once a day, so clients load it once. |
+| `job_state` | The mutable half — `progress`, `progress_at`, `crew_count`, `done`. Split out so Realtime payloads don't re-broadcast a job's coordinate array every time a crew shows up. |
+| `crews` | Who is on what, and `arrives_at` (when driving ends and work begins) |
+| `contributions` | Work units per player per job; splits the payout |
+| `players` | Name, county, XP, budget, level, daily score |
+| `feed` | Ticker + chat |
+| `day_scores` | Frozen standings per finished day |
+| `wv_counties` | WVDOT's county list, loaded by the ingest job |
+
+`pg_cron` replaces the old `setInterval` timers: a sweep every minute settles any
+job nobody is watching, incidents spawn every two minutes, and history is pruned
+nightly.
+
+---
+
+# LAN setup (one Node process)
+
+Nothing to configure — good for a quick game with people on your network.
+
+```bash
+npm install
+npm start
+```
+
+Open `http://localhost:8080`; the console also prints a LAN address to share.
+State lives in `data/` (delete it for a clean slate). This path also honours
+`SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` if you'd rather it keep profiles in
+Postgres — see [`server/store.js`](server/store.js).
+
+Verify a running server:
 
 ```bash
 npm run check
@@ -128,6 +171,23 @@ npm run check
 
 Connects three test managers, piles them onto one work order, and asserts the
 board, geometry, dispatch, crowd completion, XP payout and leaderboard all work.
+
+## Layout
+
+```
+web/            hosted client — static, no build step
+supabase/       schema.sql: tables, RLS, RPCs, pg_cron, Realtime
+ingest/push.js  daily PDF -> geometry -> Postgres job (GitHub Actions)
+server/
+  wv511.js      district-page scrape, PDF text extraction, report row parser
+  lrs.js        county lookup + milepoint-to-geometry clipping (shared by both paths)
+  config.js     endpoints and game tuning constants
+  index.js      LAN mode: HTTP + WebSocket server
+  game.js       LAN mode: tick loop, crews, scoring, incidents
+  store.js      LAN mode persistence: JSON files or Supabase
+  tools/        refresh.js (coverage report), selftest.js (end-to-end check)
+public/         LAN-mode client
+```
 
 ---
 

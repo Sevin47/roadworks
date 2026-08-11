@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WVDOT Roadworks — District Dispatch</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🚧</text></svg>" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+
+<div id="boot" class="overlay">
+  <div class="boot-card">
+    <div class="logo"><span class="cone">🚧</span> WVDOT <b>ROADWORKS</b></div>
+    <p class="tagline">Live district dispatch, built on today's real WV511 daily road reports.</p>
+    <div id="bootStatus" class="boot-status">Connecting…</div>
+    <form id="joinForm" class="join" hidden>
+      <label>Manager name
+        <input id="nameInput" maxlength="22" placeholder="e.g. S. Eldridge" required />
+      </label>
+      <label>Your county
+        <select id="countySelect"></select>
+      </label>
+      <button type="submit" class="primary">Report for duty</button>
+    </form>
+    <p class="fineprint">
+      Work orders are parsed straight from the ten WVDOH district PDFs on wv511.org and located on the
+      WVDOT Roads &amp; Highways county-milepoint route network. Everyone shares one board — the more
+      crews on a job, the faster it closes.
+    </p>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="brand"><span class="cone">🚧</span> WVDOT <b>ROADWORKS</b></div>
+  <div class="daybox">
+    <div class="daylabel">Daily Road Report</div>
+    <div class="daydate" id="dayDate">—</div>
+  </div>
+  <div class="progressbox">
+    <div class="progresshead"><span id="progressLabel">0 / 0 work orders closed</span><span id="incidentBadge" class="incident-badge" hidden></span></div>
+    <div class="bar"><div class="fill" id="dayFill"></div></div>
+  </div>
+  <div class="topstats">
+    <div><b id="statOnline">0</b><span>managers</span></div>
+    <div><b id="statCrews">0</b><span>crews out</span></div>
+    <div><b id="statOpen">0</b><span>open</span></div>
+  </div>
+  <span id="linkState" class="linkstate" title="Realtime connection">●</span>
+</header>
+
+<main>
+  <aside class="panel left">
+    <section class="card me" id="meCard">
+      <div class="me-head">
+        <div class="avatar" id="meAvatar">?</div>
+        <div>
+          <div class="me-name" id="meName">—</div>
+          <div class="me-sub" id="meSub">—</div>
+        </div>
+      </div>
+      <div class="xpwrap"><div class="xpbar"><div class="xpfill" id="xpFill"></div></div><span id="xpText">0 XP</span></div>
+      <div class="me-stats">
+        <div><b id="meFunds">$0</b><span>budget</span></div>
+        <div><b id="meDone">0</b><span>closed</span></div>
+        <div><b id="meDayXp">0</b><span>today XP</span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>My crews <span class="pill" id="crewCount">0/0</span></h3>
+      <div id="crewList" class="crewlist"><p class="empty">No crews dispatched. Pick a work order on the map or in the queue.</p></div>
+    </section>
+
+    <section class="card grow">
+      <h3>Today's leaderboard</h3>
+      <ol id="leaderboard" class="leaderboard"></ol>
+    </section>
+  </aside>
+
+  <section class="mapwrap">
+    <div id="map"></div>
+    <div class="legend" id="legend"></div>
+    <div class="maphint" id="mapHint">Click a highlighted segment to open the work order.</div>
+  </section>
+
+  <aside class="panel right">
+    <section class="card filters">
+      <h3>Work order queue</h3>
+      <input id="search" class="search" placeholder="Search activity, route, county…" />
+      <div class="filterrow">
+        <select id="districtFilter"><option value="">All districts</option></select>
+        <select id="catFilter"><option value="">All categories</option></select>
+      </div>
+      <label class="check"><input type="checkbox" id="hideDone" checked /> Hide closed</label>
+      <label class="check"><input type="checkbox" id="onlyMine" /> My district only</label>
+    </section>
+    <div id="jobList" class="joblist"></div>
+  </aside>
+</main>
+
+<footer class="bottom">
+  <div class="ticker" id="ticker"></div>
+  <form id="chatForm" class="chat">
+    <input id="chatInput" maxlength="200" placeholder="Message the other managers…" />
+    <button class="ghost" type="submit">Send</button>
+  </form>
+</footer>
+
+<div id="jobModal" class="overlay" hidden>
+  <div class="job-card" id="jobCard"></div>
+</div>
+<div id="toasts" class="toasts"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="./config.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
