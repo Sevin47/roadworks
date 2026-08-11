@@ -1,16 +1,13 @@
-import path from 'node:path';
 import crypto from 'node:crypto';
 import {
-  DATA_DIR, CATEGORY, DEFAULT_CATEGORY, TICK_MS, BASE_CREWS, MAX_CREWS,
+  CATEGORY, DEFAULT_CATEGORY, TICK_MS, FLUSH_MS, BASE_CREWS, MAX_CREWS,
   CREW_TRAVEL_MIN_S, CREW_TRAVEL_MAX_S, TEAMWORK, TEAMWORK_CAP,
   INCIDENT_INTERVAL_MS, INCIDENT_TTL_MS, MAX_LIVE_INCIDENTS
 } from './config.js';
-import { readJson, writeJson, haversineMi, hashId } from './util.js';
+import { haversineMi, hashId } from './util.js';
+import { createStore } from './store.js';
 import { fetchAllReports, cachedReport } from './wv511.js';
 import { locateRows, loadCounties, countyList, lookupCounty, releaseRouteCache } from './lrs.js';
-
-const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
-const DAY_FILE = path.join(DATA_DIR, 'day.json');
 
 const INCIDENT_KINDS = [
   { kind: 'Rock Slide',        detail: 'Rock and debris in the roadway - dispatch to clear.' },
@@ -36,24 +33,35 @@ export class Game {
     this.listeners = new Set();
     this.nextIncidentAt = Date.now() + INCIDENT_INTERVAL_MS;
     this.seq = 0;
+    this.store = null;
+    this.profilesDirty = false;
+    this.dayDirty = false;
+    this.history = [];
   }
 
   // ---------------------------------------------------------------- lifecycle
 
   async init() {
     await loadCounties();
-    this.profiles = (await readJson(PROFILES_FILE, { profiles: {} })).profiles || {};
+    this.store = await createStore();
+    this.profiles = await this.store.loadProfiles().catch(() => ({}));
+    this.history = await this.store.loadHistory().catch(() => []);
 
-    const saved = await readJson(DAY_FILE, null);
-    const live = await cachedReport();
-    if (saved && live && saved.reportDate === live.reportDate) {
+    // Come up on the saved board immediately so a restart (or a free-tier
+    // cold start) doesn't strand players behind a 60-second geocoding pass,
+    // then reconcile against WV511 in the background.
+    const saved = await this.store.loadDay().catch(() => null);
+    const restored = !!saved?.jobs?.length;
+    if (restored) {
       this.restoreDay(saved);
       this.loading = { active: false, message: '' };
-      this.log('system', `Resumed day ${saved.reportDate} with ${this.jobs.size} work orders.`);
-    } else {
-      await this.loadDay({ force: false });
+      this.log('system', `Resumed report ${saved.reportDate} with ${this.jobs.size} work orders.`);
     }
     this.timer = setInterval(() => this.tick(), TICK_MS);
+    this.flushTimer = setInterval(() => this.flush(), FLUSH_MS);
+
+    const reconcile = this.loadDay({ force: true }).catch((e) => console.warn('load failed:', e.message));
+    if (!restored) await reconcile;
   }
 
   /** Pull the current WV511 reports, geolocate every row, and build the job board. */
@@ -84,7 +92,17 @@ export class Game {
     });
     releaseRouteCache();
 
-    const previous = this.jobs;
+    // A different reporting date means a brand new day: bank yesterday's
+    // standings and zero every manager's daily score.
+    const rollover = this.day.reportDate && this.day.reportDate !== bundle.reportDate;
+    if (rollover) {
+      await this.archiveDay(this.day.reportDate);
+      for (const p of Object.values(this.profiles)) { p.dayXp = 0; p.dayDate = bundle.reportDate; }
+      for (const p of this.players.values()) { p.dayXp = 0; }
+      this.profilesDirty = true;
+    }
+
+    const previous = rollover ? new Map() : this.jobs;
     this.jobs = new Map();
     let located = 0;
     bundle.rows.forEach((row, i) => {
@@ -115,7 +133,7 @@ export class Game {
     for (const p of this.players.values()) this.recallAll(p, true);
     this.loading = { active: false, message: '' };
     this.log('system', `Daily road report ${bundle.reportDate} loaded - ${located} work orders across 10 districts.`);
-    await this.persistDay();
+    await this.flush({ force: true });
     this.emit();
   }
 
@@ -161,17 +179,35 @@ export class Game {
     this.events = saved.events || [];
   }
 
-  async persistDay() {
-    await writeJson(DAY_FILE, {
-      reportDate: this.day.reportDate,
-      day: this.day,
-      events: this.events.slice(-60),
-      jobs: [...this.jobs.values()].map((j) => ({ ...j, crews: [] }))
-    });
+  /**
+   * Writes are batched rather than issued per completion - on a busy board that
+   * would be several hundred round trips a minute against Postgres.
+   */
+  async flush({ force = false } = {}) {
+    if (!this.store) return;
+    if (this.profilesDirty || force) {
+      this.profilesDirty = false;
+      await this.store.saveProfiles(this.profiles).catch((e) => console.warn('profile save failed:', e.message));
+    }
+    if (this.dayDirty || force) {
+      this.dayDirty = false;
+      await this.store.saveDay({
+        reportDate: this.day.reportDate,
+        day: this.day,
+        events: this.events.slice(-60),
+        jobs: [...this.jobs.values()].map((j) => ({ ...j, crews: [] }))
+      }).catch((e) => console.warn('day save failed:', e.message));
+    }
   }
 
-  async persistProfiles() {
-    await writeJson(PROFILES_FILE, { profiles: this.profiles });
+  /** Freeze the finished day's standings before the board resets. */
+  async archiveDay(reportDate) {
+    if (!reportDate || !this.store) return;
+    const rows = Object.values(this.profiles)
+      .filter((p) => p.dayDate === reportDate && p.dayXp > 0)
+      .map((p) => ({ token: p.token, name: p.name, county: p.county, dayXp: p.dayXp, jobsDone: p.jobsDone }));
+    await this.store.saveDayScores(reportDate, rows).catch((e) => console.warn('archive failed:', e.message));
+    this.history = await this.store.loadHistory().catch(() => this.history);
   }
 
   // ------------------------------------------------------------------ players
@@ -211,7 +247,7 @@ export class Game {
     });
     this.players.set(id, player);
     this.tokens.set(token, id);
-    this.persistProfiles();
+    this.profilesDirty = true;
     return player;
   }
 
@@ -347,8 +383,8 @@ export class Game {
     const who = names.length ? [...new Set(names)].join(', ') : 'an unknown crew';
     this.log(job.incident ? 'incident-cleared' : 'complete',
       `${who} completed ${job.activity} on ${job.routeLabel} (${job.county} Co.)`);
-    this.persistProfiles();
-    this.persistDay();
+    this.profilesDirty = true;
+    this.dayDirty = true;
   }
 
   // ---------------------------------------------------------------- incidents
@@ -452,6 +488,7 @@ export class Game {
       crews: this.crewsPublic(),
       events: this.events.slice(-40),
       leaderboard: this.leaderboard(),
+      history: this.history,
       counties: countyList().map((c) => ({ name: c.name, code: c.code, district: c.district, center: c.center }))
     };
   }

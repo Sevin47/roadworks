@@ -35,6 +35,19 @@ const server = http.createServer(async (req, res) => {
       return json(res, { error: String(e.message) }, 502);
     }
   }
+  if (url.pathname === '/api/history') {
+    return json(res, { history: game.history });
+  }
+  if (url.pathname === '/api/health') {
+    return json(res, {
+      ok: game.jobs.size > 0,
+      loading: game.loading.active,
+      storage: game.store?.kind || 'none',
+      reportDate: game.day.reportDate,
+      jobs: game.jobs.size,
+      players: game.players.size
+    });
+  }
   if (url.pathname === '/api/refresh' && req.method === 'POST') {
     game.loadDay({ force: true }).catch(() => {});
     return json(res, { ok: true });
@@ -174,9 +187,22 @@ setInterval(async () => {
   } catch { /* keep playing on the cached day */ }
 }, REFRESH_MS);
 
+// Hosted platforms send SIGTERM on deploy and on idle spin-down; get the
+// in-flight board and scores written before the process goes away.
+let shuttingDown = false;
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n  ${sig} - saving state…`);
+    await game.flush({ force: true }).catch(() => {});
+    process.exit(0);
+  });
+}
+
 await game.init();
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   const nets = os.networkInterfaces();
   const lan = Object.values(nets).flat().find((n) => n && n.family === 'IPv4' && !n.internal);
   console.log(`\n  WVDOT Roadworks running`);

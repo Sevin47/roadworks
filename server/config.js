@@ -26,6 +26,7 @@ export const DISTRICTS_LAYER = `${GIS_BASE}/Boundaries/MapServer/3`;
 export const TICK_MS = 1000;              // simulation tick
 export const BROADCAST_MS = 1000;         // state push to clients
 export const REFRESH_MS = 20 * 60 * 1000; // how often we re-check WV511 for a new report
+export const FLUSH_MS = 12 * 1000;        // how often dirty state is written to the store
 
 export const BASE_CREWS = 3;              // crews a level-1 manager controls
 export const MAX_CREWS = 12;
