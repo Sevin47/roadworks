@@ -1,0 +1,68 @@
+name: Deploy site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish; queue at most one behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          cp -r web/. _site/
+          rm -f _site/config.example.js
+          touch _site/.nojekyll
+
+      # web/config.js is gitignored so the keys aren't sitting in the repo for
+      # scanners. Both values are public by design — they ship inside the page
+      # either way — so they live in repo *variables*, not secrets. The secrets
+      # fallback exists because SUPABASE_URL is already set that way for ingest.
+      - name: Write config.js
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::Set repository variables SUPABASE_URL and SUPABASE_ANON_KEY"
+            echo "::error::(Settings > Secrets and variables > Actions > Variables tab)"
+            exit 1
+          fi
+          cat > _site/config.js <<EOF
+          window.WVDOT_CONFIG = {
+            SUPABASE_URL: '${SUPABASE_URL}',
+            SUPABASE_ANON_KEY: '${SUPABASE_ANON_KEY}'
+          };
+          EOF
+          echo "Wrote config.js for ${SUPABASE_URL}"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

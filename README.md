@@ -111,23 +111,30 @@ loses progress they've already put in.
 
 ### 3. The site
 
-Put your two **public** values into [`web/config.js`](web/config.js):
+`web/` is plain static files — no build step, and every asset path is relative, so
+it works from a subpath like `user.github.io/repo/`.
 
-```js
-window.WVDOT_CONFIG = {
-  SUPABASE_URL: 'https://your-project-ref.supabase.co',
-  SUPABASE_ANON_KEY: 'your-anon-public-key'
-};
-```
+It needs two **public** values: your project URL and the publishable (`anon`) key.
+They ship inside the page either way — RLS is the boundary, not secrecy — but
+`web/config.js` is gitignored so they aren't sitting in the repo for scanners.
+[`web/config.example.js`](web/config.example.js) shows the shape.
 
-The anon key is public by design — it ships in every browser that loads the page.
-RLS is the boundary, not secrecy: every table is read-only to clients and every
-mutation goes through a `security definer` RPC.
+**GitHub Pages** (what this repo is set up for). Add two repository *variables* —
+**Settings → Secrets and variables → Actions → Variables**:
 
-`web/` is plain static files with no build step. Drag the folder onto
-[app.netlify.com/drop](https://app.netlify.com/drop), or connect the repo with
-publish directory `web` and no build command. Vercel, Cloudflare Pages and GitHub
-Pages all work the same way.
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+
+Then **Settings → Pages → Source → GitHub Actions**.
+[`pages.yml`](.github/workflows/pages.yml) generates `config.js` from those
+variables at deploy time and publishes on every push that touches `web/`.
+
+**Netlify / Vercel / Cloudflare Pages** work too: publish directory `web`, no build
+command — but then `config.js` has to exist in what you upload, so drag the local
+folder rather than connecting the repo.
+
+**Locally**, copy `web/config.example.js` to `web/config.js`, fill it in, and serve
+the folder any way you like (`python -m http.server 8081`).
 
 ### Data model
 
