@@ -1782,8 +1782,19 @@ exception when others then
   raise notice 'could not configure realtime (%) - the client falls back to polling', sqlerrm;
 end $$;
 
-alter table job_state replica identity full;
-alter table crews     replica identity full;
+-- Deliberately NOT `replica identity full`.
+--
+-- Full identity makes every UPDATE carry a complete copy of the old row as
+-- well as the new one, and nothing here reads `old` beyond the primary key
+-- the delete handler needs. Crew rows carry their driving route, so the saving
+-- scales with trip length: measured at 1.3-2.2KB per update on short hops,
+-- and a cross-district route of 400 points would be roughly ten times that.
+--
+-- This is a reduction in realtime traffic, not a proven fix for the dropped
+-- updates that stranded crews client-side; the periodic resync is what
+-- actually guarantees those heal.
+alter table job_state replica identity default;
+alter table crews     replica identity default;
 
 -- ============================================================================
 -- Convenience views

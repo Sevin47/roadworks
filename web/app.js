@@ -174,8 +174,15 @@
   };
   const nextRank = (xp) => state.ranks.find((r) => r.xp_required > xp) || null;
   const myRankIdx = () => (state.me ? rankOf(state.me.xp).idx : 1);
+  /**
+   * A crew whose return time has already passed is home, whether or not the
+   * delete has reached us yet. Filtering here stops one lingering at "0s" and
+   * stops it holding a slot the server has already freed.
+   */
+  const crewIsHome = (c) => !!c.return_at && Date.parse(c.return_at) <= serverNow();
+
   const myCrews = () => [...state.crews.values()]
-    .filter((c) => c.player_id === state.me?.id && !c.contractor_until);
+    .filter((c) => c.player_id === state.me?.id && !c.contractor_until && !crewIsHome(c));
   const maxCrews = () => {
     if (!state.me) return 3;
     const extra = state.catalog
@@ -280,7 +287,7 @@
 
     setInterval(animate, 250);
     setInterval(refreshPlayers, 10000);
-    setInterval(resyncBoard, 30000);
+    setInterval(resyncBoard, 15000);
     setInterval(refreshStorms, 120000);
     setInterval(() => state.me && sb.rpc('heartbeat'), 45000);
   }
@@ -376,6 +383,14 @@
         if (c.job_id === s.job_id && c.contractor_until) { state.crews.delete(id); dropRoute(id); }
       }
       if (state.me) loadMe();
+      // Their return legs are set in the same transaction that closed the job;
+      // fetch them now rather than waiting on the periodic resync.
+      sb.from('crews').select('*').eq('job_id', s.job_id)
+        .then(({ data }) => {
+          for (const c of data || []) state.crews.set(c.id, c);
+          renderAll();
+        })
+        .catch(() => {});
     }
     renderAll();
   }
@@ -401,9 +416,11 @@
    * safety net: one small query, and any drift heals within 30 seconds.
    */
   async function resyncBoard() {
-    const rows = await sb.from('job_state').select('*')
-      .then((r) => r.data || []).catch(() => []);
-    if (!rows.length) return;
+    const [rows, crewRows] = await Promise.all([
+      sb.from('job_state').select('*').then((r) => r.data || []).catch(() => []),
+      sb.from('crews').select('*').then((r) => r.data || []).catch(() => null)
+    ]);
+
     let changed = 0;
     for (const s2 of rows) {
       const prev = state.stateById.get(s2.job_id);
@@ -413,10 +430,32 @@
         changed++;
       }
     }
+
+    // Crews get replaced wholesale rather than merged. A missed UPDATE used to
+    // strand a crew reading "working 100%" - the job had closed and the truck
+    // was already driving home, but this client never saw return_at get set.
+    // A missed DELETE left one parked at "returning - 0s" forever. Taking the
+    // server's list as the truth fixes both, and drops anything already reaped.
+    if (crewRows) {
+      const next = new Map(crewRows.map((c) => [c.id, c]));
+      let crewChanged = next.size !== state.crews.size;
+      if (!crewChanged) {
+        for (const [id, c] of next) {
+          const prev = state.crews.get(id);
+          if (!prev || prev.return_at !== c.return_at || prev.arrives_at !== c.arrives_at ||
+              prev.boost_until !== c.boost_until) { crewChanged = true; break; }
+        }
+      }
+      if (crewChanged) {
+        for (const id of state.crews.keys()) if (!next.has(id)) dropRoute(id);
+        state.crews = next;
+        changed++;
+      }
+    }
+
     if (changed) {
       for (const j of state.jobs.values()) upsertJobLayer(j);
-      renderHeader();
-      renderJobList();
+      renderAll();
     }
   }
 
@@ -819,7 +858,7 @@
     const seen = new Set();
     for (const c of state.crews.values()) {
       const job = state.jobs.get(c.job_id);
-      if (!job || !job.centroid) continue;
+      if (!job || !job.centroid || crewIsHome(c)) continue;
       seen.add(c.id);
 
       const homeward = !!c.return_at;
@@ -1048,7 +1087,7 @@
   function crewSignature() {
     const now = serverNow();
     return [...state.crews.values()]
-      .filter((c) => c.player_id === state.me?.id)
+      .filter((c) => c.player_id === state.me?.id && !crewIsHome(c))
       .map((c) => `${c.id}${c.return_at ? 'h' : Date.parse(c.arrives_at) <= now ? 'w' : 't'}` +
                   `${c.convoy ? 'c' : ''}` +
                   `${c.boost_until && Date.parse(c.boost_until) > now ? 'b' : ''}`)
@@ -1077,6 +1116,10 @@
       return `job done · returning to ${fac ? fac.name : 'the garage'} — ${back}s`;
     }
 
+    // The job is closed but this crew's own row has not caught up yet. Say what
+    // is actually happening rather than parking it at "working 100%".
+    if (j && jobDone(j)) return `${j.route_label} · job done · heading back`;
+
     const eta = Math.ceil((Date.parse(c.arrives_at) - now) / 1000);
     const { progress } = liveProgress(c.job_id);
     const pct = j ? Math.round((progress / Number(j.effort)) * 100) : 0;
@@ -1091,7 +1134,8 @@
     if (!state.me) return;
     renderMe();
     state.crewSig = crewSignature();
-    const mine = [...state.crews.values()].filter((c) => c.player_id === state.me.id);
+    const mine = [...state.crews.values()]
+      .filter((c) => c.player_id === state.me.id && !crewIsHome(c));
     const list = $('crewList');
     if (!mine.length) {
       list.innerHTML = '<p class="empty">No crews dispatched. Pick a work order on the map or in the queue.</p>';
