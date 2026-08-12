@@ -268,6 +268,7 @@
 
     setInterval(animate, 250);
     setInterval(refreshPlayers, 10000);
+    setInterval(resyncBoard, 30000);
     setInterval(refreshStorms, 120000);
     setInterval(() => state.me && sb.rpc('heartbeat'), 45000);
   }
@@ -357,7 +358,11 @@
     const prev = state.stateById.get(s.job_id);
     state.stateById.set(s.job_id, s);
     if (s.done && !prev?.done) {
-      for (const [id, c] of state.crews) if (c.job_id === s.job_id) { state.crews.delete(id); dropRoute(id); }
+      // Only contractors actually disappear at completion; everyone else is
+      // driving home and must stay on the map until the server says otherwise.
+      for (const [id, c] of state.crews) {
+        if (c.job_id === s.job_id && c.contractor_until) { state.crews.delete(id); dropRoute(id); }
+      }
       if (state.me) loadMe();
     }
     renderAll();
@@ -372,6 +377,34 @@
     if (l) { map.removeLayer(l); layers.jobs.delete(id); }
     if (state.selected === id) closeJob();
     renderAll();
+  }
+
+  /**
+   * Pull the whole board state back down periodically.
+   *
+   * Realtime is the fast path, not a guarantee - a dropped or throttled
+   * postgres_changes message used to leave a finished job showing its category
+   * colour indefinitely, because nothing ever revisited it. This is the cheap
+   * safety net: one small query, and any drift heals within 30 seconds.
+   */
+  async function resyncBoard() {
+    const rows = await sb.from('job_state').select('*')
+      .then((r) => r.data || []).catch(() => []);
+    if (!rows.length) return;
+    let changed = 0;
+    for (const s2 of rows) {
+      const prev = state.stateById.get(s2.job_id);
+      if (!prev || prev.done !== s2.done || prev.crew_count !== s2.crew_count ||
+          prev.progress !== s2.progress) {
+        state.stateById.set(s2.job_id, s2);
+        changed++;
+      }
+    }
+    if (changed) {
+      for (const j of state.jobs.values()) upsertJobLayer(j);
+      renderHeader();
+      renderJobList();
+    }
   }
 
   async function refreshPlayers() {
@@ -516,31 +549,58 @@
   }
 
   // ------------------------------------------------------------- map layers
-  const jobColor = (j) =>
-    state.stateById.get(j.id)?.done ? '#2f9e5f' : (CATEGORY[j.category] || '#8b98a8');
+  /**
+   * Whether a job should read as closed *anywhere* in the UI.
+   *
+   * The server row is authoritative, but a job whose local integral has already
+   * reached its effort is finished in every way that matters to the player -
+   * they are just waiting on a settle round trip. Deriving both the map colour
+   * and the card from this one predicate is what keeps them from disagreeing,
+   * which is exactly what happened when the map read st.done and the card was
+   * computing progress itself.
+   */
+  function jobDone(j) {
+    const st = state.stateById.get(j.id);
+    if (st?.done) return true;
+    if (!st || !j) return false;
+    // With nobody on site the banked figure is the whole story, and this runs
+    // for every segment on the board on each pass - keep the common case cheap.
+    if (!st.crew_count) return Number(st.progress) >= Number(j.effort);
+    return liveProgress(j.id).progress >= Number(j.effort);
+  }
+
+  const jobColor = (j) => (jobDone(j) ? '#2f9e5f' : (CATEGORY[j.category] || '#8b98a8'));
 
   function upsertJobLayer(j) {
     if (!Array.isArray(j.coords) || j.coords.length < 2) return;
     const st = state.stateById.get(j.id);
     const busy = (st?.crew_count || 0) > 0;
     const mine = state.me && j.district === state.me.district;
+    const done = jobDone(j);
     const style = {
       color: jobColor(j),
       weight: j.min_crews > 1 ? 9 : j.incident ? 7 : busy ? 6 : 4,
-      opacity: st?.done ? 0.3 : (state.me && !mine && !j.incident) ? 0.32 : 0.92,
+      opacity: done ? 0.3 : (state.me && !mine && !j.incident) ? 0.32 : 0.92,
       dashArray: j.approx ? '5,6' : null
     };
+    // Restyling and re-binding a tooltip on every pass over 600 polylines is
+    // wasted work; only touch a layer when something it displays has changed.
+    const key = `${style.color}|${style.weight}|${style.opacity}|${st?.crew_count || 0}`;
     let line = layers.jobs.get(j.id);
     if (!line) {
       line = L.polyline(j.coords.map((c) => [c[1], c[0]]), style).addTo(map);
       line.on('click', () => openJob(j.id));
       layers.jobs.set(j.id, line);
     } else {
+      if (line._styleKey === key) return;
       line.setStyle(style);
     }
+    line._styleKey = key;
+    line.unbindTooltip();
     line.bindTooltip(
       `<b>${esc(j.activity)}</b><br>${esc(j.route_label)} ${esc(j.route_name || '')}<br>` +
       `${esc(j.county)} Co. · D${j.district}${busy ? ` · ${plural(st.crew_count, 'crew', 'crews')}` : ''}` +
+      `${done ? '<br><b>closed today</b>' : ''}` +
       `${j.min_crews > 1 ? `<br><b>⛑ CALLOUT — needs ${j.min_crews} crews</b>` : ''}` +
       `${j.storm ? '<br>⚠ storm conditions — double XP' : ''}` +
       `${j.milestone ? '<br>🏁 milestone route — segment bonuses' : ''}` +
@@ -803,7 +863,14 @@
       const job = state.jobs.get(id);
       const bar = document.querySelector(`#jobList [data-job="${cssEsc(id)}"] .pfill`);
       if (bar && job) bar.style.width = `${Math.min(100, (progress / Number(job.effort)) * 100)}%`;
-      if (done) { maybeSettle(id); touched = true; }
+      if (done) {
+        maybeSettle(id);
+        // Recolour the moment it finishes rather than waiting for the settle
+        // round trip to come back. Without this the segment stayed its category
+        // colour until some later event happened to trigger a full re-render.
+        if (job) upsertJobLayer(job);
+        touched = true;
+      }
     }
     // These used to call the full renderers, which reassign innerHTML. At 4 Hz
     // that destroyed and recreated every button between a user's mousedown and
@@ -992,8 +1059,7 @@
     const home = state.me?.home;
     return [...state.jobs.values()]
       .filter((j) => {
-        const st = state.stateById.get(j.id);
-        if (hideDone && st?.done) return false;
+        if (hideDone && jobDone(j)) return false;
         if (d && String(j.district) !== d) return false;
         if (cat && j.category !== cat) return false;
         if (mineOnly && !dispatchable(j)) return false;
@@ -1002,6 +1068,8 @@
         return true;
       })
       .sort((a, b) => {
+        const ad = jobDone(a), bd = jobDone(b);
+        if (ad !== bd) return ad ? 1 : -1;
         if (a.incident !== b.incident) return a.incident ? -1 : 1;
         const da = dispatchable(a), db2 = dispatchable(b);
         if (da !== db2) return da ? -1 : 1;
@@ -1022,7 +1090,7 @@
       const { progress } = liveProgress(j.id);
       const pct = Math.min(100, (progress / Number(j.effort)) * 100);
       const away = state.me && !dispatchable(j);
-      return `<div class="job ${st?.done ? 'done' : ''} ${mineIds.has(j.id) ? 'mine' : ''} ${j.incident ? 'incident' : ''} ${away ? 'away' : ''} ${j.min_crews > 1 ? 'callout' : ''}"
+      return `<div class="job ${jobDone(j) ? 'done' : ''} ${mineIds.has(j.id) ? 'mine' : ''} ${j.incident ? 'incident' : ''} ${away ? 'away' : ''} ${j.min_crews > 1 ? 'callout' : ''}"
                    style="border-left-color:${jobColor(j)}" data-job="${esc(j.id)}">
         <div class="t">${j.min_crews > 1 ? '⛑ ' : j.incident ? '⚠ ' : ''}${esc(j.activity)}${j.milestone ? ' 🏁' : ''}</div>
         <div class="r">
@@ -1064,7 +1132,7 @@
     const myCrew = jobCrews.find((c) => c.player_id === state.me?.id && !c.contractor_until);
     const { working } = liveProgress(j.id);
     return [
-      j.id, st?.done ? 1 : 0,
+      j.id, jobDone(j) ? 1 : 0,
       myCrew ? 1 : 0,
       jobCrews.some((c) => c.player_id === state.me?.id && c.contractor_until) ? 1 : 0,
       myCrews().length >= maxCrews() ? 1 : 0,
@@ -1091,7 +1159,7 @@
     const crews = $('jcCrews');
     const fill = $('jcFill');
     const callout = $('jcCallout');
-    if (status) status.textContent = st?.done ? 'Closed' : `${Math.round(pct)}% complete`;
+    if (status) status.textContent = jobDone(j) ? 'Closed' : `${Math.round(pct)}% complete`;
     if (crews) {
       crews.textContent = `${plural(working, 'crew', 'crews')} working` +
         (eta ? ` · ~${fmtDur(eta)} left` : '');
@@ -1107,6 +1175,7 @@
     if (!j) return closeJob();
     state.cardSig = jobCardSignature();
     const st = state.stateById.get(j.id);
+    const done = jobDone(j);
     const { progress, working } = liveProgress(j.id);
     const effort = Number(j.effort);
     const pct = Math.min(100, (progress / effort) * 100);
@@ -1140,29 +1209,29 @@
         ${state.focus && j.category === state.focus ? '<dt>Focus</dt><dd class="focus-note">★ Focus category this week — +50% XP.</dd>' : ''}
         ${away ? `<dt>Territory</dt><dd class="warn">District ${j.district} is outside your district — only incidents are statewide.</dd>` : ''}
       </dl>
-      ${j.min_crews > 1 && !st?.done ? `
+      ${j.min_crews > 1 && !done ? `
       <div class="callout-bar ${working >= j.min_crews ? 'ready' : ''}">
         ⛑ <b>EMERGENCY CALLOUT</b> — <span id="jcCallout">${working} of ${j.min_crews} crews on site.</span>
         ${working >= j.min_crews ? 'Work is underway.'
           : `No work happens until ${plural(j.min_crews - working, 'more crew arrives', 'more crews arrive')}.`}
       </div>` : ''}
       <div class="jobprog">
-        <div class="lbl"><span id="jcStatus">${st?.done ? 'Closed' : `${Math.round(pct)}% complete`}</span>
+        <div class="lbl"><span id="jcStatus">${done ? 'Closed' : `${Math.round(pct)}% complete`}</span>
           <span id="jcCrews">${plural(working, 'crew', 'crews')} working${eta ? ` · ~${fmtDur(eta)} left` : ''}</span></div>
         <div class="bar"><div class="fill" id="jcFill" style="width:${pct}%"></div></div>
       </div>
       <div class="helpers">${helpers.length ? '👷 ' + helpers.map(esc).join(', ') : 'No crews on site yet.'}</div>
       <div class="job-actions">
-        ${st?.done
+        ${done
           ? '<button class="ghost" data-close>Closed for today</button>'
           : myCrew
             ? `<button class="primary" data-recall="${esc(j.id)}">Recall my crew</button>`
             : `<button class="primary" data-dispatch="${esc(j.id)}" ${away || full ? 'disabled' : ''}>${
                 away ? 'Outside your district' : full ? 'All crews busy' : 'Dispatch a crew'}</button>`}
         <button class="ghost" data-close>Close</button>
-        ${st?.done ? '' : `<button class="ghost" data-radio="${esc(j.id)}" title="Ask the other managers for help">📻 Request backup</button>`}
+        ${done ? '' : `<button class="ghost" data-radio="${esc(j.id)}" title="Ask the other managers for help">📻 Request backup</button>`}
       </div>
-      ${ot && !st?.done && !away ? `
+      ${ot && !done && !away ? `
       <div class="overtime">
         <div class="ot-head">Overtime <span class="pill">$${(state.me?.funds || 0).toLocaleString()}</span></div>
         <div class="ot-row">
