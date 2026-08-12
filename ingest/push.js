@@ -12,6 +12,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { fetchAllReports } from '../server/wv511.js';
 import { locateRows, loadCounties, countyList, releaseRouteCache } from '../server/lrs.js';
+import { fetchFacilities, summarize } from '../server/facilities.js';
 import { CATEGORY, DEFAULT_CATEGORY } from '../server/config.js';
 
 const DRY = process.argv.includes('--dry-run');
@@ -89,6 +90,10 @@ async function main() {
   console.log(`unlocated      : ${miss}`);
   console.log(`work orders    : ${jobs.length}`);
 
+  console.log('\nLoading WVDOT facilities…');
+  const facilities = await fetchFacilities();
+  console.log(' ', JSON.stringify(summarize(facilities)));
+
   if (DRY) {
     console.log(`\nDry run — nothing written. ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     return;
@@ -99,6 +104,7 @@ async function main() {
     code: c.code, name: c.name, district: c.district, center: c.center
   }));
   await must(db.from('wv_counties').upsert(counties, { onConflict: 'code' }), 'wv_counties');
+  await must(db.from('facilities').upsert(facilities, { onConflict: 'id' }), 'facilities');
 
   const { data: existing } = await db.from('game_day').select('report_date').order('report_date', { ascending: false }).limit(1);
   const previousDate = existing?.[0]?.report_date || null;

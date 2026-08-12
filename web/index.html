@@ -57,10 +57,12 @@
         <div class="avatar" id="meAvatar">?</div>
         <div>
           <div class="me-name" id="meName">—</div>
+          <div class="me-rank" id="meRank">Flagger</div>
           <div class="me-sub" id="meSub">—</div>
         </div>
       </div>
       <div class="xpwrap"><div class="xpbar"><div class="xpfill" id="xpFill"></div></div><span id="xpText">0 XP</span></div>
+      <div class="xpnext" id="xpNext"></div>
       <div class="me-stats">
         <div><b id="meFunds">$0</b><span>budget</span></div>
         <div><b id="meDone">0</b><span>closed</span></div>
@@ -69,7 +71,12 @@
     </section>
 
     <section class="card">
-      <h3>My crews <span class="pill" id="crewCount">0/0</span></h3>
+      <h3>My crews
+        <span>
+          <button id="garageBtn" class="ghost tiny" hidden title="Equipment garage">🔧 Garage</button>
+          <span class="pill" id="crewCount">0/0</span>
+        </span>
+      </h3>
       <div id="crewList" class="crewlist"><p class="empty">No crews dispatched. Pick a work order on the map or in the queue.</p></div>
     </section>
 
@@ -110,6 +117,9 @@
 
 <div id="jobModal" class="overlay" hidden>
   <div class="job-card" id="jobCard"></div>
+</div>
+<div id="garageModal" class="overlay" hidden>
+  <div class="job-card" id="garageCard"></div>
 </div>
 <div id="toasts" class="toasts"></div>
 

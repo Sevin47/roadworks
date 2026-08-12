@@ -2,9 +2,9 @@
  *
  * There is no game server and no tick. Postgres stores each job's banked
  * progress plus the instant it was banked; between Realtime events this file
- * re-derives the current value from crew arrival times, exactly the way
- * settle_job() does. When the local math says a job is finished it asks
- * Postgres to settle, and Postgres recomputes the whole thing itself.
+ * re-derives the current value from crew arrival times, boosts and contractor
+ * shifts, exactly the way settle_job() does. When the local math says a job is
+ * finished it asks Postgres to settle, and Postgres recomputes it itself.
  */
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -28,79 +28,105 @@
     'Closures':              '#ff5d5d',
     'Construction Projects': '#ff8a3d',
     'Utilities/Oil & Gas':   '#7cf29b',
+    'Winter Ops':            '#a8e6ff',
     'Incident':              '#ff2e63'
   };
 
+  const BASE_RATE = 0.5;          // must match base_crew_rate() in the schema
+  const GAME_SECS_PER_DRIVE_SEC = 1 / 30;
+  const OSRM = 'https://router.project-osrm.org/route/v1/driving';
+
   const state = {
     reportDate: null,
-    jobs: new Map(),      // id -> static job row
-    stateById: new Map(), // id -> job_state row
-    crews: new Map(),     // crew id -> crew row
+    jobs: new Map(),
+    stateById: new Map(),
+    crews: new Map(),
     players: new Map(),
     counties: [],
+    facilities: [],
+    ranks: [],
+    catalog: [],
+    owned: new Set(),
+    reportCards: [],
     me: null,
     selected: null,
-    skewMs: 0,            // serverNow - clientNow
+    skewMs: 0,
     settling: new Set(),
-    seenFeed: new Set()
+    seenFeed: new Set(),
+    busy: false
   };
 
-  const layers = { jobs: new Map(), crews: new Map() };
+  const layers = { jobs: new Map(), crews: new Map(), routes: new Map(), facilities: null };
   const serverNow = () => Date.now() + state.skewMs;
 
   // -------------------------------------------------------------------- map
   const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([38.85, -80.4], 8);
   L.tileLayer('https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     maxZoom: 19,
-    attribution: '&copy; OpenStreetMap, &copy; CARTO | work orders: WV511 | routes: WVDOT GIS'
+    attribution: '&copy; OpenStreetMap, &copy; CARTO | work orders: WV511 | routes: WVDOT GIS | driving: OSRM'
   }).addTo(map);
 
   // ------------------------------------------------------------ progress math
-  // Mirror of settle_job(): the crowd rate is constant between crew arrivals,
-  // so integrate span by span.
   const multiplier = (n) => (n <= 0 ? 0 : Math.min(3.0, 1 + 0.12 * (n - 1)));
 
+  /** Mirror of settle_job(): integrate span by span between rate-change events. */
   function liveProgress(jobId) {
     const job = state.jobs.get(jobId);
     const st = state.stateById.get(jobId);
     if (!job || !st) return { progress: 0, working: 0, done: false };
-    if (st.done) return { progress: job.effort, working: 0, done: true };
+    if (st.done) return { progress: Number(job.effort), working: 0, done: true };
 
-    const arrivals = [...state.crews.values()]
-      .filter((c) => c.job_id === jobId)
-      .map((c) => Date.parse(c.arrives_at))
-      .sort((a, b) => a - b);
-
+    const crews = [...state.crews.values()].filter((c) => c.job_id === jobId);
+    const now = serverNow();
     let progress = Number(st.progress);
     let cursor = Date.parse(st.progress_at);
-    const now = serverNow();
-    const marks = arrivals.filter((t) => t > cursor && t <= now).concat(now);
 
-    for (const mark of marks) {
-      const n = arrivals.filter((t) => t <= cursor).length;
+    const events = [];
+    for (const c of crews) {
+      for (const t of [Date.parse(c.arrives_at),
+                       c.boost_until ? Date.parse(c.boost_until) : NaN,
+                       c.contractor_until ? Date.parse(c.contractor_until) : NaN]) {
+        if (Number.isFinite(t) && t > cursor && t <= now) events.push(t);
+      }
+    }
+    events.push(now);
+    events.sort((a, b) => a - b);
+
+    const effort = Number(job.effort);
+    for (const mark of events) {
+      const active = crews.filter((c) =>
+        Date.parse(c.arrives_at) <= cursor &&
+        (!c.contractor_until || Date.parse(c.contractor_until) > cursor));
       const dt = (mark - cursor) / 1000;
-      if (n > 0 && dt > 0) {
-        const gain = n * multiplier(n) * dt;
-        progress = Math.min(job.effort, progress + gain);
-        if (progress >= job.effort) break;
+      if (active.length && dt > 0) {
+        const sum = active.reduce((s, c) =>
+          s + Number(c.rate || BASE_RATE) *
+              (c.boost_until && Date.parse(c.boost_until) > cursor ? 2 : 1), 0);
+        progress = Math.min(effort, progress + sum * multiplier(active.length) * dt);
+        if (progress >= effort) break;
       }
       cursor = mark;
     }
-    return {
-      progress,
-      working: arrivals.filter((t) => t <= now).length,
-      done: progress >= job.effort
-    };
+    const working = crews.filter((c) =>
+      Date.parse(c.arrives_at) <= now &&
+      (!c.contractor_until || Date.parse(c.contractor_until) > now)).length;
+    return { progress, working, done: progress >= effort };
   }
 
   function etaSeconds(jobId) {
     const job = state.jobs.get(jobId);
     const { progress, working } = liveProgress(jobId);
     if (!job || !working) return 0;
-    return Math.ceil((job.effort - progress) / (working * multiplier(working)));
+    const now = serverNow();
+    const sum = [...state.crews.values()]
+      .filter((c) => c.job_id === jobId && Date.parse(c.arrives_at) <= now &&
+                     (!c.contractor_until || Date.parse(c.contractor_until) > now))
+      .reduce((s, c) => s + Number(c.rate || BASE_RATE) *
+                            (c.boost_until && Date.parse(c.boost_until) > now ? 2 : 1), 0);
+    const rate = sum * multiplier(working);
+    return rate > 0 ? Math.ceil((Number(job.effort) - progress) / rate) : 0;
   }
 
-  /** Ask Postgres to close a job our own clock says is finished. */
   async function maybeSettle(jobId) {
     if (state.settling.has(jobId)) return;
     state.settling.add(jobId);
@@ -111,6 +137,23 @@
       setTimeout(() => state.settling.delete(jobId), 3000);
     }
   }
+
+  // ------------------------------------------------------------------- ranks
+  const rankOf = (xp) => {
+    let r = state.ranks[0];
+    for (const x of state.ranks) if (xp >= x.xp_required) r = x;
+    return r || { idx: 1, name: 'Flagger', xp_required: 0, crews: 3 };
+  };
+  const nextRank = (xp) => state.ranks.find((r) => r.xp_required > xp) || null;
+  const myRankIdx = () => (state.me ? rankOf(state.me.xp).idx : 1);
+  const myCrews = () => [...state.crews.values()]
+    .filter((c) => c.player_id === state.me?.id && !c.contractor_until);
+  const maxCrews = () => {
+    if (!state.me) return 3;
+    const extra = state.catalog
+      .filter((e) => e.effect === 'crew_slot' && state.owned.has(e.key)).length;
+    return Math.min(12, rankOf(state.me.xp).crews + extra);
+  };
 
   // ------------------------------------------------------------------- boot
   async function boot() {
@@ -138,21 +181,34 @@
     }
     state.reportDate = day.report_date;
 
-    const [{ data: counties }, jobs, { data: states }, { data: crews }, { data: feed }] = await Promise.all([
-      sb.from('wv_counties').select('*').order('name'),
+    // Tables added by a later schema version are fetched defensively so a site
+    // deploy that lands before the SQL is applied degrades instead of dying.
+    const opt = (q) => q.then((r) => r.data || []).catch(() => []);
+
+    const [counties, jobs, states, crews, feed, facs, ranks, cat, cards] = await Promise.all([
+      opt(sb.from('wv_counties').select('*').order('name')),
       fetchAllJobs(day.report_date),
-      sb.from('job_state').select('*'),
-      sb.from('crews').select('*'),
-      sb.from('feed').select('*').order('created_at', { ascending: false }).limit(40)
+      opt(sb.from('job_state').select('*')),
+      opt(sb.from('crews').select('*')),
+      opt(sb.from('feed').select('*').order('created_at', { ascending: false }).limit(40)),
+      opt(sb.from('facilities').select('*').eq('dispatchable', true)),
+      opt(sb.from('ranks').select('*').order('idx')),
+      opt(sb.from('equipment_catalog').select('*').order('sort')),
+      opt(sb.from('day_report_cards').select('*').order('report_date', { ascending: false }).limit(10))
     ]);
 
-    state.counties = counties || [];
+    state.counties = counties;
+    state.facilities = facs;
+    state.ranks = ranks.length ? ranks : [{ idx: 1, name: 'Flagger', xp_required: 0, crews: 3 }];
+    state.catalog = cat;
+    state.reportCards = cards;
     for (const j of jobs) state.jobs.set(j.id, j);
     for (const s of states || []) state.stateById.set(s.job_id, s);
     for (const c of crews || []) state.crews.set(c.id, c);
     (feed || []).reverse().forEach(pushFeed);
 
     for (const j of state.jobs.values()) upsertJobLayer(j);
+    drawFacilities();
     buildLegend();
     fillCountySelect();
     fillFilters();
@@ -162,6 +218,7 @@
     const existing = await loadMe();
     if (existing) {
       $('boot').hidden = true;
+      if (existing.home) map.setView([existing.home[1], existing.home[0]], 9);
     } else {
       $('joinForm').hidden = false;
       setBoot(`${state.jobs.size} work orders on the board.`);
@@ -173,7 +230,6 @@
     setInterval(() => state.me && sb.rpc('heartbeat'), 45000);
   }
 
-  /** jobs is the one big read; page through it so a long day isn't truncated. */
   async function fetchAllJobs(reportDate) {
     const out = [];
     const PAGE = 500;
@@ -190,7 +246,12 @@
   async function loadMe() {
     const { data: { user } } = await sb.auth.getUser();
     if (!user) return null;
-    const { data } = await sb.from('players').select('*').eq('id', user.id).maybeSingle();
+    const [{ data }, eq] = await Promise.all([
+      sb.from('players').select('*').eq('id', user.id).maybeSingle(),
+      sb.from('player_equipment').select('item_key').eq('player_id', user.id)
+        .then((r) => r.data || []).catch(() => [])
+    ]);
+    state.owned = new Set(eq.map((e) => e.item_key));
     if (data) { state.me = data; renderMe(); }
     return data;
   }
@@ -204,10 +265,12 @@
         (p) => { state.jobs.set(p.new.id, p.new); upsertJobLayer(p.new); renderAll(); })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'jobs' },
         (p) => removeJob(p.old?.id))
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'crews' },
-        (p) => { state.crews.set(p.new.id, p.new); renderAll(); })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'crews' },
-        (p) => { if (p.old?.id) { state.crews.delete(p.old.id); renderAll(); } })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'crews' },
+        (p) => {
+          if (p.eventType === 'DELETE') { if (p.old?.id) { state.crews.delete(p.old.id); dropRoute(p.old.id); } }
+          else state.crews.set(p.new.id, p.new);
+          renderAll();
+        })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'feed' },
         (p) => { pushFeed(p.new); })
       .subscribe((status) => {
@@ -222,7 +285,7 @@
     const prev = state.stateById.get(s.job_id);
     state.stateById.set(s.job_id, s);
     if (s.done && !prev?.done) {
-      for (const [id, c] of state.crews) if (c.job_id === s.job_id) state.crews.delete(id);
+      for (const [id, c] of state.crews) if (c.job_id === s.job_id) { state.crews.delete(id); dropRoute(id); }
       if (state.me) loadMe();
     }
     renderAll();
@@ -232,7 +295,7 @@
     if (!id) return;
     state.jobs.delete(id);
     state.stateById.delete(id);
-    for (const [cid, c] of state.crews) if (c.job_id === id) state.crews.delete(cid);
+    for (const [cid, c] of state.crews) if (c.job_id === id) { state.crews.delete(cid); dropRoute(cid); }
     const l = layers.jobs.get(id);
     if (l) { map.removeLayer(l); layers.jobs.delete(id); }
     if (state.selected === id) closeJob();
@@ -240,7 +303,8 @@
   }
 
   async function refreshPlayers() {
-    const { data } = await sb.from('players').select('id,name,county,district,level,xp,day_xp,jobs_done,last_seen');
+    const { data } = await sb.from('players')
+      .select('id,name,county,district,level,xp,day_xp,jobs_done,last_seen');
     if (!data) return;
     state.players = new Map(data.map((p) => [p.id, p]));
     if (state.me) {
@@ -263,34 +327,98 @@
     e.preventDefault();
     const btn = e.target.querySelector('button');
     btn.disabled = true;
-    const row = await call('ensure_player', {
+    const r = await call('ensure_player', {
       p_name: $('nameInput').value.trim() || 'Manager',
       p_county: $('countySelect').value
     });
     btn.disabled = false;
-    if (!row) return;
-    state.me = Array.isArray(row) ? row[0] : row;
+    if (!r) return;
+    state.me = Array.isArray(r) ? r[0] : r;
     localStorage.setItem('wvdot.name', state.me.name);
     localStorage.setItem('wvdot.county', state.me.county);
     $('boot').hidden = true;
-    if (state.me.home) map.setView([state.me.home[1], state.me.home[0]], 10);
+    if (state.me.home) map.setView([state.me.home[1], state.me.home[0]], 9);
     renderAll();
   });
 
+  /** Nearest dispatchable facility in the job's district — same rule the server uses. */
+  function nearestFacility(job) {
+    const d = job.district;
+    let best = null;
+    for (const f of state.facilities) {
+      if (f.district !== d) continue;
+      const s = (f.lat - job.centroid[1]) ** 2 + ((f.lng - job.centroid[0]) * 0.78) ** 2;
+      if (!best || s < best.s) best = { f, s };
+    }
+    return best?.f || null;
+  }
+
+  /** Real driving route from the garage to the job, cached in Postgres. */
+  async function getRoute(fac, job) {
+    const hit = await sb.from('route_cache').select('coords,drive_secs')
+      .eq('facility_id', fac.id).eq('job_id', job.id).maybeSingle()
+      .then((r) => r.data).catch(() => null);
+    if (hit) return { coords: hit.coords, secs: Number(hit.drive_secs), cached: true };
+    try {
+      const url = `${OSRM}/${fac.lng},${fac.lat};${job.centroid[0]},${job.centroid[1]}` +
+                  '?overview=simplified&geometries=geojson';
+      const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      const d = await res.json();
+      if (d.code !== 'Ok' || !d.routes?.length) return null;
+      const r = d.routes[0];
+      let coords = r.geometry.coordinates.map((c) => [round5(c[0]), round5(c[1])]);
+      if (coords.length > 400) {
+        const step = (coords.length - 1) / 399;
+        coords = Array.from({ length: 400 }, (_, i) => coords[Math.round(i * step)]);
+      }
+      return { coords, secs: r.duration, cached: false };
+    } catch {
+      return null;   // OSRM unreachable — the server falls back to a straight line
+    }
+  }
+
   async function dispatch(jobId) {
-    const s = await call('dispatch_crew', { p_job: jobId });
-    if (s) applyJobState(Array.isArray(s) ? s[0] : s);
-    const { data } = await sb.from('crews').select('*').eq('job_id', jobId);
-    for (const c of data || []) state.crews.set(c.id, c);
-    renderAll();
+    if (state.busy) return;
+    const job = state.jobs.get(jobId);
+    if (!job) return;
+    state.busy = true;
+    try {
+      const fac = nearestFacility(job);
+      let route = null;
+      if (fac) route = await getRoute(fac, job);
+      const s = await call('dispatch_crew', {
+        p_job: jobId,
+        p_facility: fac ? fac.id : null,
+        p_route: route ? route.coords : null,
+        p_secs: route ? route.secs : null
+      });
+      if (s) applyJobState(Array.isArray(s) ? s[0] : s);
+      const { data } = await sb.from('crews').select('*').eq('job_id', jobId);
+      for (const c of data || []) state.crews.set(c.id, c);
+      renderAll();
+    } finally {
+      state.busy = false;
+    }
   }
 
   async function recall(jobId) {
     const s = await call('recall_crew', { p_job: jobId });
     if (s) applyJobState(Array.isArray(s) ? s[0] : s);
     for (const [id, c] of state.crews) {
-      if (c.job_id === jobId && c.player_id === state.me?.id) state.crews.delete(id);
+      if (c.job_id === jobId && c.player_id === state.me?.id && !c.contractor_until) {
+        state.crews.delete(id); dropRoute(id);
+      }
     }
+    renderAll();
+  }
+
+  async function overtime(fn, jobId, label) {
+    const s = await call(fn, { p_job: jobId }, label);
+    if (s) applyJobState(Array.isArray(s) ? s[0] : s);
+    const { data } = await sb.from('crews').select('*').eq('job_id', jobId);
+    for (const [id, c] of state.crews) if (c.job_id === jobId) state.crews.delete(id);
+    for (const c of data || []) state.crews.set(c.id, c);
+    await loadMe();
     renderAll();
   }
 
@@ -302,10 +430,11 @@
     if (!Array.isArray(j.coords) || j.coords.length < 2) return;
     const st = state.stateById.get(j.id);
     const busy = (st?.crew_count || 0) > 0;
+    const mine = state.me && j.district === state.me.district;
     const style = {
       color: jobColor(j),
       weight: j.incident ? 7 : busy ? 6 : 4,
-      opacity: st?.done ? 0.35 : 0.9,
+      opacity: st?.done ? 0.3 : (state.me && !mine && !j.incident) ? 0.32 : 0.92,
       dashArray: j.approx ? '5,6' : null
     };
     let line = layers.jobs.get(j.id);
@@ -318,9 +447,61 @@
     }
     line.bindTooltip(
       `<b>${esc(j.activity)}</b><br>${esc(j.route_label)} ${esc(j.route_name || '')}<br>` +
-      `${esc(j.county)} Co. · D${j.district}${busy ? ` · ${st.crew_count} crew(s)` : ''}`,
+      `${esc(j.county)} Co. · D${j.district}${busy ? ` · ${st.crew_count} crew(s)` : ''}` +
+      `${state.me && !mine && !j.incident ? '<br><i>outside your district</i>' : ''}`,
       { sticky: true }
     );
+  }
+
+  const FAC_ICON = {
+    district_hq: { r: 6, color: '#ffb703' },
+    county_hq:   { r: 4, color: '#89a' },
+    substation:  { r: 3, color: '#6b8' },
+    section:     { r: 3, color: '#7ac' },
+    shop:        { r: 3, color: '#89a' }
+  };
+
+  function drawFacilities() {
+    if (layers.facilities) map.removeLayer(layers.facilities);
+    const g = L.layerGroup();
+    for (const f of state.facilities) {
+      const s = FAC_ICON[f.kind] || FAC_ICON.shop;
+      L.circleMarker([f.lat, f.lng], {
+        radius: s.r, color: s.color, weight: 1, fillColor: s.color,
+        fillOpacity: 0.55, interactive: true
+      }).bindTooltip(`🏗 <b>${esc(f.name)}</b><br>${esc(f.county || '')} · D${f.district}`, { sticky: true })
+        .addTo(g);
+    }
+    layers.facilities = g.addTo(map);
+  }
+
+  function dropRoute(crewId) {
+    const r = layers.routes.get(crewId);
+    if (r) { map.removeLayer(r); layers.routes.delete(crewId); }
+  }
+
+  /** Point along a polyline at fraction t of its total length. */
+  function pointAlong(coords, t) {
+    if (!coords || coords.length < 2) return null;
+    const segs = [];
+    let total = 0;
+    for (let i = 1; i < coords.length; i++) {
+      const dx = (coords[i][0] - coords[i - 1][0]) * 0.78;
+      const dy = coords[i][1] - coords[i - 1][1];
+      const d = Math.hypot(dx, dy);
+      segs.push(d); total += d;
+    }
+    if (total === 0) return coords[0];
+    let want = Math.max(0, Math.min(1, t)) * total;
+    for (let i = 0; i < segs.length; i++) {
+      if (want <= segs[i] || i === segs.length - 1) {
+        const f = segs[i] ? want / segs[i] : 0;
+        return [coords[i][0] + (coords[i + 1][0] - coords[i][0]) * f,
+                coords[i][1] + (coords[i + 1][1] - coords[i][1]) * f];
+      }
+      want -= segs[i];
+    }
+    return coords[coords.length - 1];
   }
 
   function renderCrewMarkers() {
@@ -328,39 +509,63 @@
     const seen = new Set();
     for (const c of state.crews.values()) {
       const job = state.jobs.get(c.job_id);
-      const owner = state.players.get(c.player_id);
       if (!job || !job.centroid) continue;
-      const home = owner?.home || job.centroid;
       seen.add(c.id);
+
       const start = Date.parse(c.dispatched_at);
       const end = Date.parse(c.arrives_at);
       const t = end > start ? Math.max(0, Math.min(1, (now - start) / (end - start))) : 1;
-      const lat = home[1] + (job.centroid[1] - home[1]) * t;
-      const lng = home[0] + (job.centroid[0] - home[0]) * t;
-      const glyph = t >= 1 ? '🚧' : '🛻';
+      const route = Array.isArray(c.route) && c.route.length > 1 ? c.route : null;
+
+      let pos;
+      if (route) pos = pointAlong(route, t);
+      else {
+        const fac = state.facilities.find((f) => f.id === c.facility_id);
+        const home = fac ? [Number(fac.lng), Number(fac.lat)] : job.centroid;
+        pos = [home[0] + (job.centroid[0] - home[0]) * t,
+               home[1] + (job.centroid[1] - home[1]) * t];
+      }
+      if (!pos) continue;
+
+      const mineCrew = c.player_id === state.me?.id;
+      const boosted = c.boost_until && Date.parse(c.boost_until) > now;
+      const glyph = c.contractor_until ? '🚜' : t >= 1 ? (boosted ? '⚡' : '🚧') : '🛻';
+
+      // The road the crew is actually driving, shown while it drives.
+      if (route && mineCrew && t < 1) {
+        let rl = layers.routes.get(c.id);
+        if (!rl) {
+          rl = L.polyline(route.map((p) => [p[1], p[0]]),
+            { color: '#ffb703', weight: 2, opacity: 0.55, dashArray: '4,6' }).addTo(map);
+          layers.routes.set(c.id, rl);
+        }
+      } else if (t >= 1) dropRoute(c.id);
+
       let mk = layers.crews.get(c.id);
       if (!mk) {
-        mk = L.marker([lat, lng], {
+        mk = L.marker([pos[1], pos[0]], {
           icon: L.divIcon({ className: '', html: `<div class="crew-icon">${glyph}</div>`, iconSize: [20, 20] }),
-          zIndexOffset: c.player_id === state.me?.id ? 900 : 400,
+          zIndexOffset: mineCrew ? 900 : 400,
           interactive: false
         }).addTo(map);
         layers.crews.set(c.id, mk);
       } else {
-        mk.setLatLng([lat, lng]);
+        mk.setLatLng([pos[1], pos[0]]);
         const el = mk.getElement()?.querySelector('.crew-icon');
         if (el && el.textContent !== glyph) el.textContent = glyph;
       }
     }
     for (const [id, mk] of layers.crews) {
-      if (!seen.has(id)) { map.removeLayer(mk); layers.crews.delete(id); }
+      if (!seen.has(id)) { map.removeLayer(mk); layers.crews.delete(id); dropRoute(id); }
     }
   }
 
   function buildLegend() {
     $('legend').innerHTML = Object.entries(CATEGORY)
       .map(([k, v]) => `<div><i style="background:${v}"></i>${esc(k)}</div>`)
-      .join('') + '<div><i style="background:#2f9e5f"></i>Closed today</div>';
+      .join('') +
+      '<div><i style="background:#2f9e5f"></i>Closed today</div>' +
+      '<div><i style="background:#ffb703;border-radius:50%;height:6px;width:6px"></i>WVDOT garage</div>';
   }
 
   // -------------------------------------------------------------- animation
@@ -370,11 +575,12 @@
     for (const [id, st] of state.stateById) {
       if (st.done || !st.crew_count) continue;
       const { progress, done } = liveProgress(id);
-      const bar = document.querySelector(`[data-job="${cssEsc(id)}"] .pfill`);
       const job = state.jobs.get(id);
-      if (bar && job) bar.style.width = `${Math.min(100, (progress / job.effort) * 100)}%`;
+      const bar = document.querySelector(`[data-job="${cssEsc(id)}"] .pfill`);
+      if (bar && job) bar.style.width = `${Math.min(100, (progress / Number(job.effort)) * 100)}%`;
       if (done) { maybeSettle(id); touched = true; }
     }
+    if (myCrews().length || [...state.crews.values()].some((c) => c.player_id === state.me?.id)) renderMyCrews();
     if (state.selected) renderJobCard();
     if (touched) renderHeader();
   }
@@ -382,6 +588,7 @@
   // ------------------------------------------------------------------ render
   function renderAll() {
     renderHeader();
+    renderCrewMarkers();
     renderMyCrews();
     renderLeaderboard();
     renderJobList();
@@ -395,10 +602,14 @@
           { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
       : '—';
     const all = [...state.jobs.values()];
-    const done = all.filter((j) => state.stateById.get(j.id)?.done).length;
+    const mineD = state.me
+      ? all.filter((j) => j.district === state.me.district && !j.incident) : all;
+    const done = mineD.filter((j) => state.stateById.get(j.id)?.done).length;
     const inc = all.filter((j) => j.incident && !state.stateById.get(j.id)?.done).length;
-    $('progressLabel').textContent = `${done} / ${all.length} work orders closed`;
-    $('dayFill').style.width = all.length ? `${(done / all.length) * 100}%` : '0';
+    $('progressLabel').textContent = state.me
+      ? `District ${state.me.district}: ${done} / ${mineD.length} closed`
+      : `${done} / ${mineD.length} work orders closed`;
+    $('dayFill').style.width = mineD.length ? `${(done / mineD.length) * 100}%` : '0';
     const badge = $('incidentBadge');
     badge.hidden = !inc;
     badge.textContent = `⚠ ${inc} active incident${inc === 1 ? '' : 's'}`;
@@ -406,32 +617,34 @@
     $('statOnline').textContent = [...state.players.values()]
       .filter((p) => Date.parse(p.last_seen) > cutoff).length;
     $('statCrews').textContent = state.crews.size;
-    $('statOpen').textContent = all.length - done;
+    $('statOpen').textContent = mineD.length - done;
   }
 
   function renderMe() {
     const me = state.me;
     if (!me) return;
+    const r = rankOf(me.xp);
+    const nx = nextRank(me.xp);
     $('meAvatar').textContent = me.name.slice(0, 1).toUpperCase();
-    $('meName').textContent = `${me.name} · Lvl ${me.level}`;
+    $('meName').textContent = me.name;
+    $('meRank').textContent = r.name;
     $('meSub').textContent = `${me.county} County · District ${me.district}`;
-    const cur = 40 * (me.level - 1) ** 2;
-    const next = 40 * me.level ** 2;
-    $('xpFill').style.width = `${Math.min(100, ((me.xp - cur) / (next - cur)) * 100)}%`;
-    $('xpText').textContent = `${me.xp} XP`;
+    const span = nx ? nx.xp_required - r.xp_required : 1;
+    $('xpFill').style.width = nx
+      ? `${Math.min(100, ((me.xp - r.xp_required) / span) * 100)}%` : '100%';
+    $('xpText').textContent = nx ? `${me.xp} / ${nx.xp_required} XP` : `${me.xp} XP · max rank`;
+    $('xpNext').textContent = nx ? `Next: ${nx.name}${nx.unlock ? ` — ${nx.unlock}` : ''}` : 'Commissioner of Highways';
     $('meFunds').textContent = `$${(me.funds || 0).toLocaleString()}`;
     $('meDone').textContent = me.jobs_done;
     $('meDayXp').textContent = me.day_xp;
     $('crewCount').textContent = `${myCrews().length}/${maxCrews()}`;
+    $('garageBtn').hidden = myRankIdx() < 4;
   }
-
-  const myCrews = () => [...state.crews.values()].filter((c) => c.player_id === state.me?.id);
-  const maxCrews = () => Math.min(12, 3 + Math.floor((state.me?.level || 1) / 2));
 
   function renderMyCrews() {
     if (!state.me) return;
     renderMe();
-    const mine = myCrews();
+    const mine = [...state.crews.values()].filter((c) => c.player_id === state.me.id);
     const list = $('crewList');
     if (!mine.length) {
       list.innerHTML = '<p class="empty">No crews dispatched. Pick a work order on the map or in the queue.</p>';
@@ -442,14 +655,19 @@
       const j = state.jobs.get(c.job_id);
       const eta = Math.ceil((Date.parse(c.arrives_at) - now) / 1000);
       const { progress } = liveProgress(c.job_id);
-      const pct = j ? Math.round((progress / j.effort) * 100) : 0;
-      return `<div class="crew ${eta > 0 ? 'travel' : 'working'}">
+      const pct = j ? Math.round((progress / Number(j.effort)) * 100) : 0;
+      const boosted = c.boost_until && Date.parse(c.boost_until) > now;
+      const fac = state.facilities.find((f) => f.id === c.facility_id);
+      const status = eta > 0
+        ? `en route ${eta}s${fac ? ` from ${esc(fac.name)}` : ''}`
+        : `${boosted ? '⚡ double shift · ' : ''}working ${pct}%`;
+      return `<div class="crew ${eta > 0 ? 'travel' : 'working'} ${c.contractor_until ? 'contractor' : ''}">
         <span class="dot"></span>
         <span class="who">
-          <span class="act">${esc(j ? j.activity : 'Unknown')}</span>
-          <span class="meta">${j ? esc(j.route_label) + ' · ' : ''}${eta > 0 ? `en route ${eta}s` : `working ${pct}%`}</span>
+          <span class="act">${c.contractor_until ? '🚜 ' : ''}${esc(j ? j.activity : 'Unknown')}</span>
+          <span class="meta">${j ? esc(j.route_label) + ' · ' : ''}${status}</span>
         </span>
-        <button title="Recall crew" data-recall="${esc(c.job_id)}">✕</button>
+        ${c.contractor_until ? '' : `<button title="Recall crew" data-recall="${esc(c.job_id)}">✕</button>`}
       </div>`;
     }).join('');
   }
@@ -461,9 +679,13 @@
     $('leaderboard').innerHTML = rows.map((p, i) =>
       `<li class="${p.id === state.me?.id ? 'me' : ''}">
         <span class="rk">${i + 1}</span>
-        <span class="nm">${esc(p.name)}<span style="color:var(--dim)"> · ${esc(p.county)}</span></span>
+        <span class="nm">${esc(p.name)}<span style="color:var(--dim)"> · D${p.district ?? '?'}</span></span>
         <span class="sc">${p.day_xp}</span>
       </li>`).join('') || '<li class="empty">Nobody on shift yet.</li>';
+  }
+
+  function dispatchable(j) {
+    return !!state.me && (j.incident || j.district === state.me.district);
   }
 
   function filteredJobs() {
@@ -471,7 +693,7 @@
     const d = $('districtFilter').value;
     const cat = $('catFilter').value;
     const hideDone = $('hideDone').checked;
-    const mineOnly = $('onlyMine').checked && state.me;
+    const mineOnly = $('onlyMine').checked;
     const home = state.me?.home;
     return [...state.jobs.values()]
       .filter((j) => {
@@ -479,13 +701,15 @@
         if (hideDone && st?.done) return false;
         if (d && String(j.district) !== d) return false;
         if (cat && j.category !== cat) return false;
-        if (mineOnly && j.district !== state.me.district) return false;
+        if (mineOnly && !dispatchable(j)) return false;
         if (q && !(`${j.activity} ${j.route_label} ${j.route_name} ${j.county} ${j.detail}`
           .toLowerCase().includes(q))) return false;
         return true;
       })
       .sort((a, b) => {
         if (a.incident !== b.incident) return a.incident ? -1 : 1;
+        const da = dispatchable(a), db2 = dispatchable(b);
+        if (da !== db2) return da ? -1 : 1;
         const ca = state.stateById.get(a.id)?.crew_count || 0;
         const cb = state.stateById.get(b.id)?.crew_count || 0;
         if (!!ca !== !!cb) return cb - ca;
@@ -496,12 +720,14 @@
   }
 
   function renderJobList() {
-    const mineIds = new Set(myCrews().map((c) => c.job_id));
+    const mineIds = new Set([...state.crews.values()]
+      .filter((c) => c.player_id === state.me?.id).map((c) => c.job_id));
     $('jobList').innerHTML = filteredJobs().map((j) => {
       const st = state.stateById.get(j.id);
       const { progress } = liveProgress(j.id);
-      const pct = Math.min(100, (progress / j.effort) * 100);
-      return `<div class="job ${st?.done ? 'done' : ''} ${mineIds.has(j.id) ? 'mine' : ''} ${j.incident ? 'incident' : ''}"
+      const pct = Math.min(100, (progress / Number(j.effort)) * 100);
+      const away = state.me && !dispatchable(j);
+      return `<div class="job ${st?.done ? 'done' : ''} ${mineIds.has(j.id) ? 'mine' : ''} ${j.incident ? 'incident' : ''} ${away ? 'away' : ''}"
                    style="border-left-color:${jobColor(j)}" data-job="${esc(j.id)}">
         <div class="t">${j.incident ? '⚠ ' : ''}${esc(j.activity)}</div>
         <div class="r">
@@ -533,12 +759,21 @@
     if (!j) return closeJob();
     const st = state.stateById.get(j.id);
     const { progress, working } = liveProgress(j.id);
-    const pct = Math.min(100, (progress / j.effort) * 100);
-    const mine = myCrews().some((c) => c.job_id === j.id);
+    const effort = Number(j.effort);
+    const pct = Math.min(100, (progress / effort) * 100);
+    const now = serverNow();
+    const jobCrews = [...state.crews.values()].filter((c) => c.job_id === j.id);
+    const myCrew = jobCrews.find((c) => c.player_id === state.me?.id && !c.contractor_until);
+    const myContractor = jobCrews.some((c) => c.player_id === state.me?.id && c.contractor_until);
     const full = myCrews().length >= maxCrews();
     const eta = etaSeconds(j.id);
-    const helpers = [...new Set([...state.crews.values()]
-      .filter((c) => c.job_id === j.id).map((c) => c.player_name))];
+    const helpers = [...new Set(jobCrews.map((c) => c.player_name))];
+    const away = state.me && !dispatchable(j);
+    const fac = state.facilities.find((f) => f.id === myCrew?.facility_id) || nearestFacility(j);
+    const ot = myRankIdx() >= 3;
+    const driving = myCrew && Date.parse(myCrew.arrives_at) > now;
+    const boosted = myCrew?.boost_until && Date.parse(myCrew.boost_until) > now;
+
     $('jobCard').innerHTML = `
       <h2>${j.incident ? '⚠ ' : ''}${esc(j.activity)}</h2>
       <div class="sub">${esc(j.category)} · ${esc(j.county)} County · WVDOH District ${j.district}</div>
@@ -546,24 +781,71 @@
         <dt>Route</dt><dd>${esc(j.route_label)} ${j.route_name ? '— ' + esc(j.route_name) : ''}</dd>
         <dt>Milepoints</dt><dd>BMP ${Number(j.bmp).toFixed(2)} → EMP ${Number(j.emp).toFixed(2)} (${j.miles} mi)</dd>
         <dt>Scheduled</dt><dd>${esc(j.start_time)} – ${esc(j.end_time)}</dd>
+        ${fac ? `<dt>Dispatch from</dt><dd>🏗 ${esc(fac.name)}</dd>` : ''}
         ${j.detail ? `<dt>Detail</dt><dd>${esc(j.detail)}</dd>` : ''}
         ${j.approx ? '<dt>Location</dt><dd class="warn">Milepoints fall outside the mapped route extent — full route shown.</dd>' : ''}
         ${j.incident ? `<dt>Clears at</dt><dd class="warn">${new Date(j.expires_at).toLocaleTimeString()}</dd>` : ''}
+        ${away ? `<dt>Territory</dt><dd class="warn">District ${j.district} is outside your district — only incidents are statewide.</dd>` : ''}
       </dl>
       <div class="jobprog">
         <div class="lbl"><span>${st?.done ? 'Closed' : `${Math.round(pct)}% complete`}</span>
-          <span>${working} crew(s) working${eta ? ` · ~${eta}s left` : ''}</span></div>
+          <span>${working} crew(s) working${eta ? ` · ~${fmtDur(eta)} left` : ''}</span></div>
         <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
       </div>
       <div class="helpers">${helpers.length ? '👷 ' + helpers.map(esc).join(', ') : 'No crews on site yet.'}</div>
       <div class="job-actions">
         ${st?.done
           ? '<button class="ghost" data-close>Closed for today</button>'
-          : mine
+          : myCrew
             ? `<button class="primary" data-recall="${esc(j.id)}">Recall my crew</button>`
-            : `<button class="primary" data-dispatch="${esc(j.id)}" ${full ? 'disabled' : ''}>${full ? 'All crews busy' : 'Dispatch a crew'}</button>`}
+            : `<button class="primary" data-dispatch="${esc(j.id)}" ${away || full ? 'disabled' : ''}>${
+                away ? 'Outside your district' : full ? 'All crews busy' : 'Dispatch a crew'}</button>`}
         <button class="ghost" data-close>Close</button>
-      </div>`;
+      </div>
+      ${ot && !st?.done && !away ? `
+      <div class="overtime">
+        <div class="ot-head">Overtime <span class="pill">$${(state.me?.funds || 0).toLocaleString()}</span></div>
+        <div class="ot-row">
+          <button class="ot" data-ot="hot" data-job="${esc(j.id)}" ${driving ? '' : 'disabled'}>
+            🛻 Hot-shot <b>$75</b><span>skip the drive</span></button>
+          <button class="ot" data-ot="dbl" data-job="${esc(j.id)}" ${myCrew && !boosted ? '' : 'disabled'}>
+            ⚡ Double shift <b>$150</b><span>2× for 10 min</span></button>
+          <button class="ot" data-ot="con" data-job="${esc(j.id)}" ${myContractor ? 'disabled' : ''}>
+            🚜 Contractor <b>$400</b><span>extra crew, 15 min</span></button>
+        </div>
+      </div>` : ''}`;
+  }
+
+  // ---------------------------------------------------------------- garage
+  function openGarage() {
+    if (myRankIdx() < 4) return toast('The equipment garage unlocks at County Supervisor.', 'warn');
+    $('garageModal').hidden = false;
+    renderGarage();
+  }
+  function renderGarage() {
+    const funds = state.me?.funds || 0;
+    const rank = myRankIdx();
+    $('garageCard').innerHTML = `
+      <h2>Equipment garage</h2>
+      <div class="sub">Budget on hand: <b style="color:var(--good)">$${funds.toLocaleString()}</b></div>
+      <div class="shop">
+        ${state.catalog.map((e) => {
+          const owned = state.owned.has(e.key);
+          const locked = rank < e.min_rank;
+          const afford = funds >= e.cost;
+          return `<div class="shop-item ${owned ? 'owned' : ''}">
+            <div class="si-main">
+              <div class="si-name">${esc(e.name)}${owned ? ' <span class="owned-tag">in service</span>' : ''}</div>
+              <div class="si-blurb">${esc(e.blurb)}</div>
+              ${locked ? `<div class="si-lock">Requires ${esc((state.ranks.find((r) => r.idx === e.min_rank) || {}).name || '')}</div>` : ''}
+            </div>
+            <button class="primary si-buy" data-buy="${esc(e.key)}"
+              ${owned || locked || !afford ? 'disabled' : ''}>
+              ${owned ? '✓' : `$${e.cost.toLocaleString()}`}</button>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="job-actions"><button class="ghost" data-close-garage>Close</button></div>`;
   }
 
   // ------------------------------------------------------------ ticker/toast
@@ -578,6 +860,7 @@
     t.prepend(div);
     while (t.childElementCount > 60) t.lastElementChild.remove();
     if (e.kind === 'incident') toast(e.body, 'warn');
+    if (e.kind === 'report-card') toast(e.body, 'good');
     if (e.kind === 'system' && e.body.includes('reset')) setTimeout(() => location.reload(), 3000);
   }
 
@@ -586,7 +869,7 @@
     d.className = `toast ${level === 'good' ? 'good' : ''}`;
     d.textContent = text;
     $('toasts').append(d);
-    setTimeout(() => d.remove(), 4200);
+    setTimeout(() => d.remove(), 4600);
   }
 
   // ---------------------------------------------------------------- controls
@@ -608,17 +891,37 @@
     for (const k of Object.keys(CATEGORY)) c.insertAdjacentHTML('beforeend', `<option value="${esc(k)}">${esc(k)}</option>`);
   }
 
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', async (e) => {
+    const ot = e.target.closest('[data-ot]');
+    if (ot) {
+      const fn = { hot: 'buy_hot_shot', dbl: 'buy_double_shift', con: 'buy_contractor' }[ot.dataset.ot];
+      const msg = { hot: 'Crew is on site.', dbl: 'Double shift started.', con: 'Contractor rolling.' }[ot.dataset.ot];
+      ot.disabled = true;
+      return overtime(fn, ot.dataset.job, msg);
+    }
+    const buy = e.target.closest('[data-buy]');
+    if (buy) {
+      buy.disabled = true;
+      const r = await call('buy_equipment', { p_key: buy.dataset.buy }, 'Put into service.');
+      if (r) { await loadMe(); renderAll(); }
+      return renderGarage();
+    }
+    if (e.target.closest('#garageBtn')) return openGarage();
+    if (e.target.closest('[data-close-garage]') || e.target.id === 'garageModal') {
+      $('garageModal').hidden = true; return;
+    }
     const disp = e.target.closest('[data-dispatch]');
-    if (disp) return dispatch(disp.dataset.dispatch);
+    if (disp) { disp.disabled = true; return dispatch(disp.dataset.dispatch); }
     const rec = e.target.closest('[data-recall]');
     if (rec) return recall(rec.dataset.recall);
     if (e.target.closest('[data-close]') || e.target.id === 'jobModal') return closeJob();
     const jobEl = e.target.closest('[data-job]');
-    if (jobEl) return openJob(jobEl.dataset.job);
+    if (jobEl && !e.target.closest('[data-ot]')) return openJob(jobEl.dataset.job);
   });
 
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeJob(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeJob(); $('garageModal').hidden = true; }
+  });
 
   for (const id of ['search', 'districtFilter', 'catFilter', 'hideDone', 'onlyMine']) {
     $(id).addEventListener('input', renderJobList);
@@ -637,9 +940,14 @@
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
   const cssEsc = (s) => (window.CSS?.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&'));
+  const round5 = (n) => Math.round(n * 1e5) / 1e5;
   function dist(a, b) {
     if (!a || !b) return 1e9;
     return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
+  }
+  function fmtDur(s) {
+    if (s < 60) return `${s}s`;
+    return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
   }
 
   boot().catch((e) => setBoot(`Startup failed: ${esc(e.message)}`));

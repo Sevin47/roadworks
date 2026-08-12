@@ -93,6 +93,9 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .xpwrap { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--dim); }
 .xpbar { flex: 1; height: 6px; background: #0a0f15; border-radius: 99px; overflow: hidden; }
 .xpfill { height: 100%; background: var(--accent2); width: 0; transition: width .4s; }
+.me-rank { font-size: 12px; color: var(--accent); font-weight: 600; letter-spacing: .02em; }
+.xpnext { font-size: 11px; color: var(--dim); margin-top: 4px; }
+.tiny { padding: 2px 7px; font-size: 11px; }
 .me-stats { display: flex; justify-content: space-between; margin-top: 10px; }
 .me-stats b { display: block; color: var(--good); }
 .me-stats span { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
@@ -181,6 +184,39 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .helpers { font-size: 12px; color: var(--accent2); min-height: 18px; }
 .job-actions { display: flex; gap: 8px; margin-top: 16px; }
 .warn { color: var(--accent); font-size: 12px; }
+
+/* ---------------------------------------------------- overtime + garage */
+.overtime { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+.ot-head { display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim); margin-bottom: 8px; }
+.ot-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.ot {
+  background: #0f1620; border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 6px; cursor: pointer; font-size: 12px; text-align: center; line-height: 1.3;
+}
+.ot b { display: block; color: var(--good); font-size: 13px; }
+.ot span { display: block; color: var(--dim); font-size: 10px; }
+.ot:hover:not(:disabled) { border-color: var(--accent); }
+.ot:disabled { opacity: .35; cursor: not-allowed; }
+
+.shop { display: grid; gap: 8px; max-height: 52vh; overflow-y: auto; margin: 14px 0; }
+.shop-item {
+  display: flex; align-items: center; gap: 10px; background: #0f1620;
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+}
+.shop-item.owned { opacity: .62; border-color: var(--good); }
+.si-main { flex: 1; min-width: 0; }
+.si-name { font-weight: 600; font-size: 13px; }
+.si-blurb { font-size: 12px; color: var(--dim); }
+.si-lock { font-size: 11px; color: var(--accent); margin-top: 2px; }
+.owned-tag { font-size: 10px; color: var(--good); text-transform: uppercase; letter-spacing: .06em; }
+.si-buy { min-width: 84px; padding: 8px 10px; }
+
+.job.away { opacity: .45; }
+.job.away .t::after { content: ' 🔒'; font-size: 11px; }
+.crew.contractor { border-style: dashed; }
+.ticker .overtime, .ticker .equipment { color: var(--accent); }
+.ticker .report-card { color: var(--accent); font-weight: 600; }
 
 .toasts { position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%); display: grid; gap: 6px; z-index: 3000; }
 .toast { background: #1b2531; border: 1px solid var(--accent); color: var(--txt); padding: 8px 14px; border-radius: 99px; font-size: 13px; animation: rise .3s; }
