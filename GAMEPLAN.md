@@ -44,6 +44,45 @@ card, leaderboard grouping); county walls don't.
 Implementation: one `where` clause in `dispatch_crew()` (`player.district =
 job.district OR job.incident`), plus the XP bonus factor at payout.
 
+## 1b. Facilities & real driving routes
+
+Crews stop teleporting from an abstract county centroid. Both halves ride on real
+data, verified working:
+
+### Real dispatch origins
+`Transportation/MapServer/4` (WV_DOT_Facilities) carries **218 real WVDOT
+facilities**: 10 district HQs, ~63 county headquarters, ~57 substations, plus the
+interstate/corridor section garages ("I-79 Section 1", "Corridor G Section 2").
+The ingest job loads them into a `facilities` table (name, kind, district, county,
+point). Materials-division labs are excluded — labs don't dispatch plows.
+
+- Facility markers render on the map (small garage icons; district HQs larger).
+  Your county HQ is your "home" pin.
+- **Crews roll from the nearest facility in your district to the job**, not from a
+  county centroid. A Boone County job gets a crew from Seth Substation; an I-79 job
+  gets one from the I-79 section garage. Substations exist in the data precisely so
+  response times are short — now that's gameplay.
+
+### Crews drive real roads
+On dispatch, the client asks OSRM (`router.project-osrm.org`, free, https, verified
+reachable from the Pages origin) for the driving route facility → job. The crew
+marker then animates *along the actual roadway* — down Corridor G, over the bridge,
+around the hollow — interpolated between `dispatched_at` and `arrives_at` by
+cumulative distance, so every player's screen shows the same truck at the same spot.
+
+Serverless mechanics:
+- `dispatch_crew(p_job, p_route, p_secs)` accepts the simplified polyline + drive
+  time from the client. The server **clamps** `p_secs` against its own straight-line
+  estimate (×1–×3 band, plus absolute 8–75s bounds after game-scaling) — the route
+  is cosmetic, the clock stays server-authoritative, so a patched client can't buy
+  meaningful speed.
+- Game time scale: ~2 s per real driving minute. A 37-minute real drive plays as a
+  ~74 s trip → clamped to 75 s. Hot-shot dispatch ($75) skips it entirely.
+- **Route cache table**: facility→job pairs are stored on first fetch; the first
+  dispatcher pays the OSRM call, everyone else (and every later crew) reuses it.
+  Keeps us a polite light user of the public demo server; if it ever flakes, the
+  fallback is the straight line we ship today.
+
 ## 2. The three currencies
 
 | | Earned by | Spent on | Resets |
@@ -233,7 +272,9 @@ Ranked by bang-for-buck:
 **Phase 1 — "Money matters" (keystone refactor + first sinks)**
 `settle_job()` per-crew-rate refactor · 0.5 rate rebase · district territory rule +
 home-county bonus · rank table (10 ranks) with UI gating · overtime ×3 · equipment
-garage · report card at rollover
+garage · report card at rollover · **facilities table + nearest-garage dispatch +
+OSRM driving routes** (travel is being rewritten for territory anyway — do the
+origins and routes in the same pass)
 
 **Phase 2 — "Come back tomorrow"**
 Daily quota + streaks · commendations · incident SLA · focus category · convoy
