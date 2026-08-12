@@ -862,6 +862,12 @@ language plpgsql security definer set search_path = public
 as $$
 declare v_funds integer;
 begin
+  -- A negative amount would *credit* the account. This is an internal helper
+  -- and EXECUTE is revoked from players below, but the guard stays: the cost of
+  -- being wrong about that once is every budget in the game.
+  if p_amount is null or p_amount <= 0 then
+    raise exception 'invalid amount';
+  end if;
   select funds into v_funds from players where id = p_player for update;
   if v_funds is null then raise exception 'no manager profile yet'; end if;
   if v_funds < p_amount then
@@ -1356,6 +1362,35 @@ end $$;
 select cron.schedule('roadworks-sweep',     '* * * * *',   $$select sweep_jobs(); select expire_incidents();$$);
 select cron.schedule('roadworks-incidents', '*/2 * * * *', $$select spawn_incident();$$);
 select cron.schedule('roadworks-prune',     '17 4 * * *',  $$select prune_history();$$);
+
+-- ============================================================================
+-- Function privileges
+--
+-- Postgres grants EXECUTE on new functions to PUBLIC, and PostgREST exposes
+-- every one of them as an RPC. Row level security does nothing here: these are
+-- security-definer functions, so anyone who can call them runs them as the
+-- owner. Everything that is not a deliberate player action is locked down.
+--
+-- (Left callable on purpose: settle_job is idempotent and recomputes from
+-- server state, and nearest_facility is a read-only helper the client already
+-- mirrors.)
+-- ============================================================================
+do $$
+declare f text;
+begin
+  foreach f in array array[
+    'spend(uuid,integer,text)',
+    'spawn_incident()',
+    'sweep_jobs()',
+    'expire_incidents()',
+    'roll_day(date)',
+    'build_report_cards(date)',
+    'mark_milestone_jobs(date)',
+    'prune_history()']
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', f);
+  end loop;
+end $$;
 
 -- ============================================================================
 -- Realtime — only the small, frequently-changing tables are published.

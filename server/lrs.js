@@ -21,7 +21,7 @@ export async function loadCounties() {
       outFields: 'NAME,CO_CODE,Districts,FIPS',
       returnGeometry: 'true',
       outSR: '4326',
-      maxAllowableOffset: '0.02',
+      maxAllowableOffset: '0.004',
       geometryPrecision: '4'
     });
     rows = res.features.map((f) => ({
@@ -49,7 +49,7 @@ export function lookupCounty(name) {
 }
 
 /** Largest ring of a county polygon, thinned enough to draw cheaply. */
-function outline(geom, maxPts = 90) {
+function outline(geom, maxPts = 140) {
   let best = null;
   for (const ring of geom?.rings || []) {
     if (!best || ring.length > best.length) best = ring;
