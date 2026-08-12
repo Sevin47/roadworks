@@ -1117,10 +1117,18 @@ begin
 
   if v_convoy > 0 then
     v_travel := v_travel * 0.6;
+    -- `and not convoy` matters: without it every later dispatch re-applied the
+    -- 0.6 to crews that had already been sped up, so four crews rolling
+    -- together cut the first one's trip to 0.6^3 of its length and a big pile-on
+    -- arrived almost instantly. The discount is once per crew, and the floor is
+    -- reapplied here because this update sidesteps the clamp below.
     update crews
-       set arrives_at = now() + make_interval(secs => extract(epoch from (arrives_at - now())) * 0.6),
+       set arrives_at = greatest(
+             now() + interval '4 seconds',
+             now() + make_interval(secs => extract(epoch from (arrives_at - now())) * 0.6)),
            convoy = true
      where job_id = p_job and arrives_at > now() and return_at is null
+       and not convoy
        and dispatched_at > now() - interval '60 seconds';
     insert into player_day (player_id, report_date, convoys)
     select c.player_id, v_job.report_date, 1 from crews c
