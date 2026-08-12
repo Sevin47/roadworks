@@ -56,6 +56,7 @@
     skewMs: 0,
     settling: new Set(),
     seenFeed: new Set(),
+    hydrated: false,      // suppresses toasts while the backlog is replayed
     cardSig: null,
     crewSig: null,
     busy: false
@@ -235,7 +236,10 @@
     for (const j of jobs) state.jobs.set(j.id, j);
     for (const s of states || []) state.stateById.set(s.job_id, s);
     for (const c of crews || []) state.crews.set(c.id, c);
-    (feed || []).reverse().forEach(pushFeed);
+    // Replaying the backlog must not fire forty toasts at once. The ticker
+    // still fills in; only the pop-ups are held back until the board is up.
+    feed.reverse().forEach(pushFeed);
+    state.hydrated = true;
 
     // Decoration must never be able to stop the game from starting. A single
     // bad draw call used to take the whole board down with it.
@@ -543,23 +547,29 @@
     );
   }
 
-  const FAC_ICON = {
-    district_hq: { r: 6, color: '#ffb703' },
-    county_hq:   { r: 4, color: '#89a' },
-    substation:  { r: 3, color: '#6b8' },
-    section:     { r: 3, color: '#7ac' },
-    shop:        { r: 3, color: '#89a' }
+  // Every WVDOT facility draws the same for now: a garage is a garage, and
+  // ranking them by size or colour implied a hierarchy the game does not use.
+  const FAC_COLOR = '#8fa6bd';
+  const FAC_RADIUS = 3.5;
+
+  const FAC_LABEL = {
+    district_hq: 'District headquarters',
+    county_hq: 'County headquarters',
+    substation: 'Substation',
+    section: 'Section garage',
+    shop: 'Equipment shop'
   };
 
   function drawFacilities() {
     if (layers.facilities) map.removeLayer(layers.facilities);
     const g = L.layerGroup();
     for (const f of state.facilities) {
-      const s = FAC_ICON[f.kind] || FAC_ICON.shop;
       L.circleMarker([f.lat, f.lng], {
-        radius: s.r, color: s.color, weight: 1, fillColor: s.color,
+        radius: FAC_RADIUS, color: FAC_COLOR, weight: 1, fillColor: FAC_COLOR,
         fillOpacity: 0.55, interactive: true
-      }).bindTooltip(`🏗 <b>${esc(f.name)}</b><br>${esc(f.county || '')} · D${f.district}`, { sticky: true })
+      }).bindTooltip(
+        `<b>${esc(f.name)}</b><br>${esc(FAC_LABEL[f.kind] || 'Facility')}` +
+        `<br>${esc(f.county || '')} · D${f.district}`, { sticky: true })
         .addTo(g);
     }
     layers.facilities = g.addTo(map);
@@ -686,7 +696,17 @@
 
       const mineCrew = c.player_id === state.me?.id;
       const boosted = c.boost_until && Date.parse(c.boost_until) > now;
-      const glyph = c.contractor_until ? '🚜' : t >= 1 ? (boosted ? '⚡' : '🚧') : '🛻';
+      const phase = t >= 1 ? 'work' : 'drive';
+
+      // Heading, so a driving truck actually points down the road it is on.
+      let heading = 0;
+      if (phase === 'drive') {
+        const ahead = route ? pointAlong(route, Math.min(1, t + 0.02)) : job.centroid;
+        if (ahead) {
+          heading = Math.atan2(ahead[0] - pos[0], ahead[1] - pos[1]) * 180 / Math.PI;
+        }
+      }
+      const html = crewMarkerHtml(phase, heading, mineCrew, !!c.contractor_until, boosted);
 
       // The road the crew is actually driving, shown while it drives.
       if (route && mineCrew && t < 1) {
@@ -701,20 +721,60 @@
       let mk = layers.crews.get(c.id);
       if (!mk) {
         mk = L.marker([pos[1], pos[0]], {
-          icon: L.divIcon({ className: '', html: `<div class="crew-icon">${glyph}</div>`, iconSize: [20, 20] }),
+          icon: L.divIcon({ className: 'crew-pin-wrap', html, iconSize: [26, 26], iconAnchor: [13, 13] }),
           zIndexOffset: mineCrew ? 900 : 400,
           interactive: false
         }).addTo(map);
         layers.crews.set(c.id, mk);
+        mk._html = html;
       } else {
         mk.setLatLng([pos[1], pos[0]]);
-        const el = mk.getElement()?.querySelector('.crew-icon');
-        if (el && el.textContent !== glyph) el.textContent = glyph;
+        // Rotation changes constantly; swapping the whole icon every frame is
+        // wasteful, so nudge the transform and only re-render on a real change.
+        const el = mk.getElement();
+        const body = el && el.firstElementChild;
+        if (body && mk._phase === phase) {
+          body.style.setProperty('--rot', `${heading}deg`);
+        } else if (mk._html !== html) {
+          mk.setIcon(L.divIcon({ className: 'crew-pin-wrap', html, iconSize: [26, 26], iconAnchor: [13, 13] }));
+          mk._html = html;
+        }
       }
+      mk._phase = phase;
     }
     for (const [id, mk] of layers.crews) {
       if (!seen.has(id)) { map.removeLayer(mk); layers.crews.delete(id); dropRoute(id); }
     }
+  }
+
+  /**
+   * Crew marker. Inline SVG rather than an emoji: the pickup-truck emoji is
+   * Emoji 13.0 and renders as a tofu box on Windows builds that ship an older
+   * Segoe UI Emoji, which is exactly what it was doing.
+   */
+  function crewMarkerHtml(phase, heading, mine, contractor, boosted) {
+    const fill = contractor ? '#b892ff' : mine ? '#ffb703' : '#4cc9f0';
+    const cls = ['crew-pin', phase, mine ? 'mine' : '', boosted ? 'boosted' : ''].join(' ');
+
+    if (phase === 'drive') {
+      // Truck seen from above, nose up; the wrapper rotates it to the heading.
+      return `<div class="${cls}" style="--rot:${heading}deg;--pin:${fill}">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+          <circle cx="12" cy="12" r="11" class="halo"/>
+          <path class="body" d="M12 2.6 15.2 7h-.9v3.1h2.3l1.1 5.4v4.2a1 1 0 0 1-1 1h-1.3v-1.6H8.6V20.7H7.3a1 1 0 0 1-1-1v-4.2l1.1-5.4h2.3V7h-.9z"/>
+          <rect class="glass" x="9.6" y="11.4" width="4.8" height="2.6" rx=".6"/>
+        </svg>
+      </div>`;
+    }
+
+    // On site: a work zone, not a vehicle.
+    return `<div class="${cls}" style="--pin:${fill}">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+        <circle cx="12" cy="12" r="11" class="halo"/>
+        <path class="body" d="M12 4.4 18.6 18H5.4z"/>
+        <path class="stripe" d="M9.4 12.6h5.2l1 2H8.4zM10.6 9.2h2.8l.9 2h-4.6z"/>
+      </svg>
+    </div>`;
   }
 
   function buildLegend() {
@@ -722,7 +782,7 @@
       .map(([k, v]) => `<div><i style="background:${v}"></i>${esc(k)}</div>`)
       .join('') +
       '<div><i style="background:#2f9e5f"></i>Closed today</div>' +
-      '<div><i style="background:#ffb703;border-radius:50%;height:6px;width:6px"></i>WVDOT garage</div>';
+      `<div><i style="background:${FAC_COLOR};border-radius:50%;height:7px;width:7px"></i>WVDOT garage</div>`;
   }
 
   // -------------------------------------------------------------- animation
@@ -1145,23 +1205,34 @@
     const t = $('ticker');
     t.prepend(div);
     while (t.childElementCount > 60) t.lastElementChild.remove();
-    if (e.kind === 'incident') toast(e.body, 'warn');
+    if (!state.hydrated) return;
+    // Only things a manager can act on, or has just earned, interrupt.
     if (e.kind === 'callout') toast(e.body, 'warn');
-    if (e.kind === 'report-card') toast(e.body, 'good');
-    if (e.kind === 'radio') toast(e.body, 'warn');
-    if (e.kind === 'commendation' && state.me && e.body.startsWith(state.me.name + ' ')) {
+    else if (e.kind === 'radio') toast(e.body, 'warn');
+    else if (e.kind === 'report-card') toast(e.body, 'good');
+    else if (e.kind === 'incident' && state.me &&
+             state.jobs.get(e.job_id)?.district === state.me.district) {
+      toast(e.body, 'warn');
+    } else if (e.kind === 'commendation' && state.me && e.body.startsWith(state.me.name + ' ')) {
       toast(e.body, 'good');
       loadMe();
     }
     if (e.kind === 'system' && e.body.includes('reset')) setTimeout(() => location.reload(), 3000);
   }
 
+  /**
+   * Toasts are capped and queue-trimmed. A burst of incident spawns used to
+   * stack twenty full-width banners straight across the map; the ticker is the
+   * place for volume, this is only for things worth interrupting over.
+   */
   function toast(text, level = 'info') {
+    const box = $('toasts');
     const d = document.createElement('div');
-    d.className = `toast ${level === 'good' ? 'good' : ''}`;
+    d.className = `toast ${level === 'good' ? 'good' : level === 'warn' ? 'warn' : ''}`;
     d.textContent = text;
-    $('toasts').append(d);
-    setTimeout(() => d.remove(), 4600);
+    box.append(d);
+    while (box.childElementCount > 3) box.firstElementChild.remove();
+    setTimeout(() => d.remove(), 4200);
   }
 
   // ---------------------------------------------------------------- controls

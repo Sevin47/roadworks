@@ -1392,7 +1392,19 @@ begin
   if v_live >= 14 then return null; end if;
 
   -- Is anywhere in the state under active weather right now?
-  select * into v_storm from storm_counties order by level desc, random() limit 1;
+  --
+  -- Weighted rather than ranked: `order by level desc` meant that whenever a
+  -- single county held the only Warning, every storm incident in the state
+  -- landed there and the board turned into one county's bad day. Dividing a
+  -- random draw by the level gives a Warning county roughly twice the pull of a
+  -- Watch county while still spreading across all of them. Counties already
+  -- holding three live incidents are skipped outright.
+  select * into v_storm from storm_counties sc
+   where (select count(*) from jobs j
+            join job_state s on s.job_id = j.id
+           where j.incident and not s.done and j.county_code = sc.code) < 3
+   order by random() / greatest(sc.level, 1)
+   limit 1;
 
   if v_storm.code is not null and random() < (case when v_storm.level >= 2 then 0.8 else 0.45 end) then
     -- Storm-driven: pull a donor segment from the affected county, favouring

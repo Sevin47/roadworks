@@ -284,10 +284,35 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .ticker .overtime, .ticker .equipment { color: var(--accent); }
 .ticker .report-card { color: var(--accent); font-weight: 600; }
 
-.toasts { position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%); display: grid; gap: 6px; z-index: 3000; }
-.toast { background: #1b2531; border: 1px solid var(--accent); color: var(--txt); padding: 8px 14px; border-radius: 99px; font-size: 13px; animation: rise .3s; }
-.toast.good { border-color: var(--good); }
-@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+/* Bottom-right and narrow, so alerts never cover the map they refer to. */
+.toasts {
+  position: fixed; right: 16px; bottom: 128px;
+  display: grid; gap: 6px; z-index: 3000;
+  width: min(330px, 34vw); pointer-events: none;
+}
+.toast {
+  background: rgba(27,37,49,.96); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent2); color: var(--txt);
+  padding: 8px 12px; border-radius: 8px; font-size: 12px; line-height: 1.4;
+  box-shadow: 0 6px 18px #0008; animation: rise .25s ease-out;
+}
+.toast.good { border-left-color: var(--good); }
+.toast.warn { border-left-color: var(--bad); }
+@keyframes rise { from { opacity: 0; transform: translateX(12px); } }
+
+/* ------------------------------------------------------------ crew markers */
+.crew-pin-wrap { background: none; border: 0; }
+.crew-pin { width: 26px; height: 26px; display: block; }
+.crew-pin svg { display: block; overflow: visible; }
+.crew-pin.drive svg { transform: rotate(var(--rot, 0deg)); transition: transform .25s linear; }
+.crew-pin .halo { fill: #0d1117; fill-opacity: .72; stroke: var(--pin); stroke-width: 1.4; }
+.crew-pin .body { fill: var(--pin); }
+.crew-pin .glass { fill: #0d1117; fill-opacity: .8; }
+.crew-pin .stripe { fill: #0d1117; fill-opacity: .85; }
+.crew-pin.mine .halo { stroke-width: 2; }
+.crew-pin.work { animation: workpulse 1.9s ease-in-out infinite; }
+.crew-pin.boosted { animation: workpulse .9s ease-in-out infinite; }
+@keyframes workpulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.16); } }
 
 /* Leaflet dark tweaks */
 .leaflet-container { background: #0b1016; }
