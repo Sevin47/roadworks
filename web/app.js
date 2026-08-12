@@ -59,6 +59,8 @@
     hydrated: false,      // suppresses toasts while the backlog is replayed
     cardSig: null,
     crewSig: null,
+    stacks: new Map(),    // jobId -> {i, n} position within a shared-geometry group
+    zoomKey: 0,
     busy: false
   };
 
@@ -77,6 +79,15 @@
   // pane below overlayPane (400) does that by z-index, rather than depending on
   // insertion order or restacking layers after every redraw.
   map.createPane('storms').style.zIndex = 350;
+
+  // Stacked segments are spaced in screen terms, so their geometry has to be
+  // recomputed when the scale changes. Only the ~160 shared lines move.
+  map.on('zoomend', () => {
+    state.zoomKey = map.getZoom();
+    for (const j of state.jobs.values()) {
+      if ((state.stacks.get(j.id)?.n || 1) > 1) upsertJobLayer(j);
+    }
+  });
 
   // ------------------------------------------------------------ progress math
   const multiplier = (n) => (n <= 0 ? 0 : Math.min(3.0, 1 + 0.12 * (n - 1)));
@@ -246,6 +257,7 @@
     // Decoration must never be able to stop the game from starting. A single
     // bad draw call used to take the whole board down with it.
     for (const step of [
+      indexStacks,
       () => { for (const j of state.jobs.values()) upsertJobLayer(j); },
       drawFacilities, drawStorms, buildLegend, fillCountySelect, fillFilters
     ]) {
@@ -335,7 +347,7 @@
       .on('postgres_changes', { event: '*', schema: 'public', table: 'job_state' },
         (p) => { if (p.new?.job_id) applyJobState(p.new); })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'jobs' },
-        (p) => { state.jobs.set(p.new.id, p.new); upsertJobLayer(p.new); renderAll(); })
+        (p) => { state.jobs.set(p.new.id, p.new); indexStacks(); renderAll(); })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'jobs' },
         (p) => removeJob(p.old?.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'crews' },
@@ -371,6 +383,7 @@
   function removeJob(id) {
     if (!id) return;
     state.jobs.delete(id);
+    indexStacks();
     state.stateById.delete(id);
     for (const [cid, c] of state.crews) if (c.job_id === id) { state.crews.delete(cid); dropRoute(cid); }
     const l = layers.jobs.get(id);
@@ -571,12 +584,73 @@
 
   const jobColor = (j) => (jobDone(j) ? '#2f9e5f' : (CATEGORY[j.category] || '#8b98a8'));
 
+  /**
+   * WVDOH files several activities against the same route and milepoints - a
+   * litter pickup, a mowing run and a sweep over the identical stretch of US 50
+   * are three separate work orders sharing one line. Drawn as-is they stack
+   * exactly on top of each other, so closing one changes nothing you can see:
+   * the open one above it keeps its colour. Today 163 of 634 jobs sit on a
+   * shared line, the deepest stack being 11.
+   *
+   * Group them so each can be nudged onto its own parallel ribbon.
+   */
+  function indexStacks() {
+    const groups = new Map();
+    for (const j of state.jobs.values()) {
+      if (!Array.isArray(j.coords) || j.coords.length < 2) continue;
+      const a = j.coords[0];
+      const b = j.coords[j.coords.length - 1];
+      const key = `${j.coords.length}|${a[0]},${a[1]}|${b[0]},${b[1]}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(j.id);
+    }
+    state.stacks = new Map();
+    for (const ids of groups.values()) {
+      // Sorted so every player sees the same order on the same road.
+      ids.sort();
+      ids.forEach((id, i) => state.stacks.set(id, { i, n: ids.length }));
+    }
+  }
+
+  /**
+   * Gap between stacked ribbons, in degrees, sized so it stays about 5px on
+   * screen at whatever zoom the map is at. A fixed ground distance either
+   * vanishes when zoomed out or drifts visibly off the roadway when zoomed in.
+   */
+  function stackSpacing() {
+    const lat = map.getCenter().lat;
+    const metresPerPixel = (156543.03392 * Math.cos((lat * Math.PI) / 180)) / 2 ** map.getZoom();
+    return Math.max(0.00004, Math.min(0.0009, (5 * metresPerPixel) / 111320));
+  }
+
+  /** Shift a path sideways by `d` degrees, perpendicular to its own direction. */
+  function offsetPath(coords, d) {
+    if (!d) return coords;
+    const out = [];
+    for (let i = 0; i < coords.length; i++) {
+      const p = coords[i];
+      const prev = coords[i - 1] || p;
+      const next = coords[i + 1] || p;
+      // Longitude degrees are shorter than latitude degrees this far north, so
+      // work in a locally-square space before rotating, then convert back.
+      const k = Math.cos((p[1] * Math.PI) / 180) || 1;
+      let dx = (next[0] - prev[0]) * k;
+      let dy = next[1] - prev[1];
+      const len = Math.hypot(dx, dy);
+      if (!len) { out.push(p); continue; }
+      dx /= len; dy /= len;
+      out.push([p[0] + (-dy * d) / k, p[1] + dx * d]);
+    }
+    return out;
+  }
+
   function upsertJobLayer(j) {
     if (!Array.isArray(j.coords) || j.coords.length < 2) return;
     const st = state.stateById.get(j.id);
     const busy = (st?.crew_count || 0) > 0;
     const mine = state.me && j.district === state.me.district;
     const done = jobDone(j);
+    const stack = state.stacks.get(j.id) || { i: 0, n: 1 };
     const style = {
       color: jobColor(j),
       weight: j.min_crews > 1 ? 9 : j.incident ? 7 : busy ? 6 : 4,
@@ -585,22 +659,29 @@
     };
     // Restyling and re-binding a tooltip on every pass over 600 polylines is
     // wasted work; only touch a layer when something it displays has changed.
-    const key = `${style.color}|${style.weight}|${style.opacity}|${st?.crew_count || 0}`;
+    const key = `${style.color}|${style.weight}|${style.opacity}|${st?.crew_count || 0}` +
+                `|${stack.i}/${stack.n}|${state.zoomKey}`;
+    const shift = stack.n > 1 ? (stack.i - (stack.n - 1) / 2) * stackSpacing() : 0;
     let line = layers.jobs.get(j.id);
     if (!line) {
-      line = L.polyline(j.coords.map((c) => [c[1], c[0]]), style).addTo(map);
+      line = L.polyline(offsetPath(j.coords, shift).map((c) => [c[1], c[0]]), style).addTo(map);
       line.on('click', () => openJob(j.id));
       layers.jobs.set(j.id, line);
     } else {
       if (line._styleKey === key) return;
+      if (line._stackKey !== `${stack.i}/${stack.n}|${state.zoomKey}`) {
+        line.setLatLngs(offsetPath(j.coords, shift).map((c) => [c[1], c[0]]));
+      }
       line.setStyle(style);
     }
+    line._stackKey = `${stack.i}/${stack.n}|${state.zoomKey}`;
     line._styleKey = key;
     line.unbindTooltip();
     line.bindTooltip(
       `<b>${esc(j.activity)}</b><br>${esc(j.route_label)} ${esc(j.route_name || '')}<br>` +
       `${esc(j.county)} Co. · D${j.district}${busy ? ` · ${plural(st.crew_count, 'crew', 'crews')}` : ''}` +
       `${done ? '<br><b>closed today</b>' : ''}` +
+      `${stack.n > 1 ? `<br><i>order ${stack.i + 1} of ${stack.n} on this stretch</i>` : ''}` +
       `${j.min_crews > 1 ? `<br><b>⛑ CALLOUT — needs ${j.min_crews} crews</b>` : ''}` +
       `${j.storm ? '<br>⚠ storm conditions — double XP' : ''}` +
       `${j.milestone ? '<br>🏁 milestone route — segment bonuses' : ''}` +
