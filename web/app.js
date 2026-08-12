@@ -33,7 +33,6 @@
   };
 
   const BASE_RATE = 0.5;          // must match base_crew_rate() in the schema
-  const GAME_SECS_PER_DRIVE_SEC = 1 / 30;
   const OSRM = 'https://router.project-osrm.org/route/v1/driving';
 
   const state = {
@@ -57,6 +56,8 @@
     skewMs: 0,
     settling: new Set(),
     seenFeed: new Set(),
+    cardSig: null,
+    crewSig: null,
     busy: false
   };
 
@@ -108,7 +109,10 @@
         Date.parse(c.arrives_at) <= cursor &&
         (!c.contractor_until || Date.parse(c.contractor_until) > cursor));
       const dt = (mark - cursor) / 1000;
-      if (active.length && dt > 0) {
+      // An emergency callout produces nothing below its crew threshold; the
+      // local integral has to agree with settle_job() or the client will show
+      // phantom progress and ask Postgres to close a job that hasn't started.
+      if (active.length >= (job.min_crews || 1) && active.length && dt > 0) {
         const sum = active.reduce((s, c) =>
           s + Number(c.rate || BASE_RATE) *
               (c.boost_until && Date.parse(c.boost_until) > cursor ? 2 : 1), 0);
@@ -126,7 +130,7 @@
   function etaSeconds(jobId) {
     const job = state.jobs.get(jobId);
     const { progress, working } = liveProgress(jobId);
-    if (!job || !working) return 0;
+    if (!job || !working || working < (job.min_crews || 1)) return 0;
     const now = serverNow();
     const sum = [...state.crews.values()]
       .filter((c) => c.job_id === jobId && Date.parse(c.arrives_at) <= now &&
@@ -431,6 +435,9 @@
     const job = state.jobs.get(jobId);
     if (!job) return;
     state.busy = true;
+    // Routing can take a moment; say so rather than looking dead.
+    const btn = document.querySelector(`[data-dispatch="${cssEsc(jobId)}"]`);
+    if (btn) btn.textContent = 'Dispatching…';
     try {
       const fac = nearestFacility(job);
       let route = null;
@@ -447,6 +454,9 @@
       renderAll();
     } finally {
       state.busy = false;
+      // Whatever happened, the card must not be left with a dead button.
+      state.cardSig = null;
+      tickJobCard();
     }
   }
 
@@ -500,7 +510,7 @@
     }
     line.bindTooltip(
       `<b>${esc(j.activity)}</b><br>${esc(j.route_label)} ${esc(j.route_name || '')}<br>` +
-      `${esc(j.county)} Co. · D${j.district}${busy ? ` · ${st.crew_count} crew(s)` : ''}` +
+      `${esc(j.county)} Co. · D${j.district}${busy ? ` · ${plural(st.crew_count, 'crew', 'crews')}` : ''}` +
       `${j.min_crews > 1 ? `<br><b>⛑ CALLOUT — needs ${j.min_crews} crews</b>` : ''}` +
       `${j.storm ? '<br>⚠ storm conditions — double XP' : ''}` +
       `${j.milestone ? '<br>🏁 milestone route — segment bonuses' : ''}` +
@@ -590,7 +600,7 @@
       ? state.storms.filter((s2) => s2.district === state.me.district).length : 0;
     bar.innerHTML =
       `<span class="storm-kinds">${kinds.map(esc).join(' ')}</span>` +
-      `<span>${warn.length} county${warn.length === 1 ? '' : 'ies'} under WARNING` +
+      `<span>${plural(warn.length, 'county', 'counties')} under WARNING` +
       `${watch.length ? `, ${watch.length} under watch` : ''}</span>` +
       (mine ? `<span class="storm-mine">${mine} in your district — incidents pay double</span>` : '');
     bar.title = state.storms
@@ -699,12 +709,17 @@
       if (st.done || !st.crew_count) continue;
       const { progress, done } = liveProgress(id);
       const job = state.jobs.get(id);
-      const bar = document.querySelector(`[data-job="${cssEsc(id)}"] .pfill`);
+      const bar = document.querySelector(`#jobList [data-job="${cssEsc(id)}"] .pfill`);
       if (bar && job) bar.style.width = `${Math.min(100, (progress / Number(job.effort)) * 100)}%`;
       if (done) { maybeSettle(id); touched = true; }
     }
-    if (myCrews().length || [...state.crews.values()].some((c) => c.player_id === state.me?.id)) renderMyCrews();
-    if (state.selected) renderJobCard();
+    // These used to call the full renderers, which reassign innerHTML. At 4 Hz
+    // that destroyed and recreated every button between a user's mousedown and
+    // mouseup, so clicks landed on nothing — the dispatch button appeared to
+    // need spam-clicking. Rebuild only when the controls actually change;
+    // otherwise just update the numbers in place.
+    tickMyCrews();
+    tickJobCard();
     if (touched) renderHeader();
   }
 
@@ -729,13 +744,21 @@
       ? all.filter((j) => j.district === state.me.district && !j.incident) : all;
     const done = mineD.filter((j) => state.stateById.get(j.id)?.done).length;
     const inc = all.filter((j) => j.incident && !state.stateById.get(j.id)?.done).length;
-    $('progressLabel').textContent = state.me
+    const label = $('progressLabel');
+    label.textContent = state.me
       ? `District ${state.me.district}: ${done} / ${mineD.length} closed`
       : `${done} / ${mineD.length} work orders closed`;
+    const card = state.me && state.reportCards.find((c) => c.district === state.me.district);
+    label.title = card
+      ? `Yesterday (${card.report_date}): grade ${card.grade}, ` +
+        `${card.jobs_done}/${card.jobs_total} closed, ` +
+        `${card.incidents_cleared} incidents cleared, ${card.incidents_expired} missed` +
+        (card.top_player ? ` — top: ${card.top_player}` : '')
+      : 'Work orders closed in your district today';
     $('dayFill').style.width = mineD.length ? `${(done / mineD.length) * 100}%` : '0';
     const badge = $('incidentBadge');
     badge.hidden = !inc;
-    badge.textContent = `⚠ ${inc} active incident${inc === 1 ? '' : 's'}`;
+    badge.textContent = `⚠ ${plural(inc, 'active incident', 'active incidents')}`;
     const cutoff = serverNow() - 90_000;
     $('statOnline').textContent = [...state.players.values()]
       .filter((p) => Date.parse(p.last_seen) > cutoff).length;
@@ -761,7 +784,11 @@
     $('meDone').textContent = me.jobs_done;
     $('meDayXp').textContent = me.day_xp;
     $('meStreak').textContent = me.streak ? `🔥 ${me.streak}` : '—';
-    $('meStars').textContent = `★ ${me.stars || 0}`;
+    const stars = $('meStars');
+    stars.textContent = `★ ${me.stars || 0}`;
+    stars.title = state.awards.length
+      ? ['Commendations:', ...state.awards.map((a) => `★ ${a.title}`)].join('\n')
+      : 'Commendations earned';
     const home = state.today?.jobs_home || 0;
     const q = $('quota');
     q.classList.toggle('done', home >= 5);
@@ -773,9 +800,46 @@
     $('garageBtn').hidden = myRankIdx() < 4;
   }
 
+  /** What the crew rows look like structurally; a change forces a rebuild. */
+  function crewSignature() {
+    const now = serverNow();
+    return [...state.crews.values()]
+      .filter((c) => c.player_id === state.me?.id)
+      .map((c) => `${c.id}${Date.parse(c.arrives_at) <= now ? 'w' : 't'}${c.convoy ? 'c' : ''}` +
+                  `${c.boost_until && Date.parse(c.boost_until) > now ? 'b' : ''}`)
+      .join('|');
+  }
+
+  /** Refresh the live text on existing crew rows without touching the DOM shape. */
+  function tickMyCrews() {
+    if (!state.me) return;
+    if (crewSignature() !== state.crewSig) return renderMyCrews();
+    const now = serverNow();
+    for (const c of state.crews.values()) {
+      if (c.player_id !== state.me.id) continue;
+      const el = document.querySelector(`#crewList [data-crew="${cssEsc(c.id)}"] .meta`);
+      if (el) el.textContent = crewStatusText(c, now);
+    }
+    renderMe();
+  }
+
+  function crewStatusText(c, now) {
+    const j = state.jobs.get(c.job_id);
+    const eta = Math.ceil((Date.parse(c.arrives_at) - now) / 1000);
+    const { progress } = liveProgress(c.job_id);
+    const pct = j ? Math.round((progress / Number(j.effort)) * 100) : 0;
+    const boosted = c.boost_until && Date.parse(c.boost_until) > now;
+    const fac = state.facilities.find((f) => f.id === c.facility_id);
+    const head = j ? `${j.route_label} · ` : '';
+    return eta > 0
+      ? `${head}${c.convoy ? '🚗💨 convoy · ' : ''}en route ${eta}s${fac ? ` from ${fac.name}` : ''}`
+      : `${head}${boosted ? '⚡ double shift · ' : ''}working ${pct}%`;
+  }
+
   function renderMyCrews() {
     if (!state.me) return;
     renderMe();
+    state.crewSig = crewSignature();
     const mine = [...state.crews.values()].filter((c) => c.player_id === state.me.id);
     const list = $('crewList');
     if (!mine.length) {
@@ -785,19 +849,13 @@
     const now = serverNow();
     list.innerHTML = mine.map((c) => {
       const j = state.jobs.get(c.job_id);
-      const eta = Math.ceil((Date.parse(c.arrives_at) - now) / 1000);
-      const { progress } = liveProgress(c.job_id);
-      const pct = j ? Math.round((progress / Number(j.effort)) * 100) : 0;
-      const boosted = c.boost_until && Date.parse(c.boost_until) > now;
-      const fac = state.facilities.find((f) => f.id === c.facility_id);
-      const status = eta > 0
-        ? `${c.convoy ? '🚗💨 convoy · ' : ''}en route ${eta}s${fac ? ` from ${esc(fac.name)}` : ''}`
-        : `${boosted ? '⚡ double shift · ' : ''}working ${pct}%`;
-      return `<div class="crew ${eta > 0 ? 'travel' : 'working'} ${c.contractor_until ? 'contractor' : ''}">
+      const arrived = Date.parse(c.arrives_at) <= now;
+      return `<div class="crew ${arrived ? 'working' : 'travel'} ${c.contractor_until ? 'contractor' : ''}"
+                   data-crew="${esc(c.id)}">
         <span class="dot"></span>
         <span class="who">
           <span class="act">${c.contractor_until ? '🚜 ' : ''}${esc(j ? j.activity : 'Unknown')}</span>
-          <span class="meta">${j ? esc(j.route_label) + ' · ' : ''}${status}</span>
+          <span class="meta">${esc(crewStatusText(c, now))}</span>
         </span>
         ${c.contractor_until ? '' : `<button title="Recall crew" data-recall="${esc(c.job_id)}">✕</button>`}
       </div>`;
@@ -887,9 +945,62 @@
     $('jobModal').hidden = true;
   }
 
+  /**
+   * Everything that changes which *controls* are on the card. The live numbers
+   * (percentage, ETA, crews on site) are deliberately not in here — those are
+   * updated in place so the buttons survive a click.
+   */
+  function jobCardSignature() {
+    const j = state.jobs.get(state.selected);
+    if (!j) return '';
+    const st = state.stateById.get(j.id);
+    const now = serverNow();
+    const jobCrews = [...state.crews.values()].filter((c) => c.job_id === j.id);
+    const myCrew = jobCrews.find((c) => c.player_id === state.me?.id && !c.contractor_until);
+    const { working } = liveProgress(j.id);
+    return [
+      j.id, st?.done ? 1 : 0,
+      myCrew ? 1 : 0,
+      jobCrews.some((c) => c.player_id === state.me?.id && c.contractor_until) ? 1 : 0,
+      myCrews().length >= maxCrews() ? 1 : 0,
+      myCrew && Date.parse(myCrew.arrives_at) > now ? 1 : 0,
+      myCrew?.boost_until && Date.parse(myCrew.boost_until) > now ? 1 : 0,
+      working >= (j.min_crews || 1) ? 1 : 0,
+      jobCrews.map((c) => c.player_name).sort().join(','),
+      state.me?.funds
+    ].join('~');
+  }
+
+  /** Update the live numbers on an already-rendered card. */
+  function tickJobCard() {
+    if (!state.selected) return;
+    const j = state.jobs.get(state.selected);
+    if (!j) return closeJob();
+    if (jobCardSignature() !== state.cardSig) return renderJobCard();
+
+    const st = state.stateById.get(j.id);
+    const { progress, working } = liveProgress(j.id);
+    const pct = Math.min(100, (progress / Number(j.effort)) * 100);
+    const eta = etaSeconds(j.id);
+    const status = $('jcStatus');
+    const crews = $('jcCrews');
+    const fill = $('jcFill');
+    const callout = $('jcCallout');
+    if (status) status.textContent = st?.done ? 'Closed' : `${Math.round(pct)}% complete`;
+    if (crews) {
+      crews.textContent = `${plural(working, 'crew', 'crews')} working` +
+        (eta ? ` · ~${fmtDur(eta)} left` : '');
+    }
+    if (fill) fill.style.width = `${pct}%`;
+    if (callout) {
+      callout.textContent = `${working} of ${j.min_crews} crews on site.`;
+    }
+  }
+
   function renderJobCard() {
     const j = state.jobs.get(state.selected);
     if (!j) return closeJob();
+    state.cardSig = jobCardSignature();
     const st = state.stateById.get(j.id);
     const { progress, working } = liveProgress(j.id);
     const effort = Number(j.effort);
@@ -926,13 +1037,14 @@
       </dl>
       ${j.min_crews > 1 && !st?.done ? `
       <div class="callout-bar ${working >= j.min_crews ? 'ready' : ''}">
-        ⛑ <b>EMERGENCY CALLOUT</b> — ${working} of ${j.min_crews} crews on site.
-        ${working >= j.min_crews ? 'Work is underway.' : 'No work happens until all three arrive.'}
+        ⛑ <b>EMERGENCY CALLOUT</b> — <span id="jcCallout">${working} of ${j.min_crews} crews on site.</span>
+        ${working >= j.min_crews ? 'Work is underway.'
+          : `No work happens until ${plural(j.min_crews - working, 'more crew arrives', 'more crews arrive')}.`}
       </div>` : ''}
       <div class="jobprog">
-        <div class="lbl"><span>${st?.done ? 'Closed' : `${Math.round(pct)}% complete`}</span>
-          <span>${working} crew(s) working${eta ? ` · ~${fmtDur(eta)} left` : ''}</span></div>
-        <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
+        <div class="lbl"><span id="jcStatus">${st?.done ? 'Closed' : `${Math.round(pct)}% complete`}</span>
+          <span id="jcCrews">${plural(working, 'crew', 'crews')} working${eta ? ` · ~${fmtDur(eta)} left` : ''}</span></div>
+        <div class="bar"><div class="fill" id="jcFill" style="width:${pct}%"></div></div>
       </div>
       <div class="helpers">${helpers.length ? '👷 ' + helpers.map(esc).join(', ') : 'No crews on site yet.'}</div>
       <div class="job-actions">
@@ -949,11 +1061,11 @@
       <div class="overtime">
         <div class="ot-head">Overtime <span class="pill">$${(state.me?.funds || 0).toLocaleString()}</span></div>
         <div class="ot-row">
-          <button class="ot" data-ot="hot" data-job="${esc(j.id)}" ${driving ? '' : 'disabled'}>
+          <button class="ot" data-ot="hot" data-otjob="${esc(j.id)}" ${driving ? '' : 'disabled'}>
             🛻 Hot-shot <b>$75</b><span>skip the drive</span></button>
-          <button class="ot" data-ot="dbl" data-job="${esc(j.id)}" ${myCrew && !boosted ? '' : 'disabled'}>
+          <button class="ot" data-ot="dbl" data-otjob="${esc(j.id)}" ${myCrew && !boosted ? '' : 'disabled'}>
             ⚡ Double shift <b>$150</b><span>2× for 10 min</span></button>
-          <button class="ot" data-ot="con" data-job="${esc(j.id)}" ${myContractor ? 'disabled' : ''}>
+          <button class="ot" data-ot="con" data-otjob="${esc(j.id)}" ${myContractor ? 'disabled' : ''}>
             🚜 Contractor <b>$400</b><span>extra crew, 15 min</span></button>
         </div>
       </div>` : ''}`;
@@ -995,6 +1107,9 @@
   function pushFeed(e) {
     if (!e || state.seenFeed.has(e.id)) return;
     state.seenFeed.add(e.id);
+    if (state.seenFeed.size > 600) {
+      state.seenFeed = new Set([...state.seenFeed].slice(-300));
+    }
     const div = document.createElement('div');
     div.className = e.kind;
     const time = new Date(e.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
@@ -1050,7 +1165,7 @@
       const fn = { hot: 'buy_hot_shot', dbl: 'buy_double_shift', con: 'buy_contractor' }[ot.dataset.ot];
       const msg = { hot: 'Crew is on site.', dbl: 'Double shift started.', con: 'Contractor rolling.' }[ot.dataset.ot];
       ot.disabled = true;
-      return overtime(fn, ot.dataset.job, msg);
+      return overtime(fn, ot.dataset.otjob, msg);
     }
     const buy = e.target.closest('[data-buy]');
     if (buy) {
@@ -1071,7 +1186,7 @@
     if (rad) { rad.disabled = true; return radioPing(rad.dataset.radio); }
     if (e.target.closest('[data-close]') || e.target.id === 'jobModal') return closeJob();
     const jobEl = e.target.closest('[data-job]');
-    if (jobEl && !e.target.closest('[data-ot]')) return openJob(jobEl.dataset.job);
+    if (jobEl) { e.preventDefault(); return openJob(jobEl.dataset.job); }
   });
 
   document.addEventListener('keydown', (e) => {
@@ -1095,6 +1210,8 @@
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
   const cssEsc = (s) => (window.CSS?.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&'));
+  /** Pick the right word rather than gluing a suffix onto a stem. */
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   const round5 = (n) => Math.round(n * 1e5) / 1e5;
   function dist(a, b) {
     if (!a || !b) return 1e9;

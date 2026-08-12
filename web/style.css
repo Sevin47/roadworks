@@ -148,15 +148,23 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .tag { background: #0a0f15; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
 
 /* ------------------------------------------------------------------ bottom */
-.bottom { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); background: #111820; padding: 6px 12px; }
-.ticker { flex: 1; height: 44px; overflow-y: auto; font-size: 12px; display: flex; flex-direction: column-reverse; }
+.bottom {
+  flex: 0 0 auto; display: flex; align-items: flex-end; gap: 12px;
+  border-top: 1px solid var(--line); background: #111820; padding: 8px 12px;
+}
+.ticker {
+  flex: 1; height: 96px; overflow-y: auto; font-size: 12px; line-height: 1.5;
+  display: flex; flex-direction: column-reverse; padding-right: 4px;
+}
+.ticker::-webkit-scrollbar { width: 6px; }
+.ticker::-webkit-scrollbar-thumb { background: #2b3644; border-radius: 99px; }
 .ticker div { padding: 1px 0; color: var(--dim); }
 .ticker .complete { color: var(--good); }
 .ticker .incident { color: var(--bad); font-weight: 600; }
 .ticker .incident-cleared { color: var(--good); }
 .ticker .chat { color: var(--txt); }
 .ticker .system { color: var(--accent2); }
-.chat { display: flex; gap: 6px; }
+.chat { display: flex; gap: 6px; padding-bottom: 2px; }
 .chat input { width: 280px; background: #0f1620; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
 
 /* ------------------------------------------------------- overlays / modals */
