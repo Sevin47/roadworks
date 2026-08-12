@@ -181,6 +181,12 @@ alter table crews add column if not exists route            jsonb;
 alter table crews add column if not exists boost_until      timestamptz;
 alter table crews add column if not exists contractor_until timestamptz;
 alter table crews add column if not exists convoy           boolean not null default false;
+-- A crew that has finished is deadheading back to its garage: still yours,
+-- still occupying a slot, but producing nothing until it gets home.
+alter table crews add column if not exists return_from      timestamptz;
+alter table crews add column if not exists return_at        timestamptz;
+
+create index if not exists crews_returning_idx on crews (return_at) where return_at is not null;
 
 -- A player may hold one real crew per job, plus any hired contractors, so the
 -- old blanket unique constraint is replaced by a partial one.
@@ -752,6 +758,7 @@ begin
       from crews c
      where c.job_id = p_job
        and c.arrives_at <= v_cursor
+       and c.return_at is null
        and (c.contractor_until is null or c.contractor_until > v_cursor);
 
     v_dt := extract(epoch from (v_ev.t - v_cursor));
@@ -774,6 +781,7 @@ begin
           from crews c
          where c.job_id = p_job
            and c.arrives_at <= v_cursor
+           and c.return_at is null
            and (c.contractor_until is null or c.contractor_until > v_cursor)
          group by c.player_id
       on conflict (job_id, player_id)
@@ -807,7 +815,8 @@ begin
                funds    = p.funds + round(v_job.pay_award * 0.15)::int,
                level    = rank_for(p.xp + v_bxp)
          where p.id in (select distinct c.player_id from crews c
-                         where c.job_id = p_job and c.arrives_at <= v_now);
+                         where c.job_id = p_job and c.arrives_at <= v_now
+                           and c.return_at is null);
         insert into feed (report_date, kind, body)
         values (v_job.report_date, 'milestone',
                 v_ms || '% marker reached on ' || v_job.activity || ' (' ||
@@ -816,7 +825,8 @@ begin
     end loop;
   end if;
 
-  select count(*) into v_n from crews where job_id = p_job and arrives_at <= v_now;
+  select count(*) into v_n from crews
+   where job_id = p_job and arrives_at <= v_now and return_at is null;
 
   if v_st.progress >= v_job.effort then
     -- ------------------------------------------------------------- payout
@@ -869,9 +879,22 @@ begin
       perform check_commendations(v_c.player_id, v_job.report_date);
     end loop;
 
-    select string_agg(distinct player_name, ', ') into v_names from crews where job_id = p_job;
+    select string_agg(distinct player_name, ', ') into v_names
+      from crews where job_id = p_job and return_at is null;
 
-    delete from crews where job_id = p_job;
+    -- Job done: the crews load up and drive back to the garage they came from.
+    -- The return leg runs at 60% of the outbound trip - an empty truck with
+    -- nothing to set up - and the crew is unavailable until it arrives.
+    update crews
+       set return_from = v_now,
+           return_at = v_now + make_interval(secs => greatest(6, least(45,
+             extract(epoch from (arrives_at - dispatched_at)) * 0.6))),
+           boost_until = null,
+           convoy = false
+     where job_id = p_job and contractor_until is null and return_at is null;
+
+    -- Hired contractors are not yours to bring home.
+    delete from crews where job_id = p_job and contractor_until is not null;
 
     update job_state
        set progress = v_job.effort, progress_at = v_cursor,
@@ -1032,11 +1055,21 @@ begin
   v_st := settle_job(p_job);
   if v_st.done then raise exception 'that work order is already closed'; end if;
 
+  -- Crews that have made it back to the garage are free again. Reap them here
+  -- as well as on the cron sweep so a manager is never held up waiting for it.
+  delete from crews where player_id = v_uid and return_at <= now();
+
   select count(*) into v_out from crews where player_id = v_uid and contractor_until is null;
-  if v_out >= max_crews_for(v_uid) then raise exception 'all of your crews are already out'; end if;
+  if v_out >= max_crews_for(v_uid) then
+    if exists (select 1 from crews where player_id = v_uid and return_at is not null) then
+      raise exception 'all of your crews are out - one is still returning to the garage';
+    end if;
+    raise exception 'all of your crews are already out';
+  end if;
 
   if exists (select 1 from crews
-              where job_id = p_job and player_id = v_uid and contractor_until is null) then
+              where job_id = p_job and player_id = v_uid
+                and contractor_until is null and return_at is null) then
     raise exception 'you already have a crew on that one';
   end if;
 
@@ -1080,14 +1113,14 @@ begin
   -- what makes "everyone hit Corridor G" in chat worth saying out loud.
   select count(*) into v_convoy from crews
    where job_id = p_job and dispatched_at > now() - interval '60 seconds'
-     and arrives_at > now() and player_id <> v_uid;
+     and arrives_at > now() and return_at is null and player_id <> v_uid;
 
   if v_convoy > 0 then
     v_travel := v_travel * 0.6;
     update crews
        set arrives_at = now() + make_interval(secs => extract(epoch from (arrives_at - now())) * 0.6),
            convoy = true
-     where job_id = p_job and arrives_at > now()
+     where job_id = p_job and arrives_at > now() and return_at is null
        and dispatched_at > now() - interval '60 seconds';
     insert into player_day (player_id, report_date, convoys)
     select c.player_id, v_job.report_date, 1 from crews c
@@ -1122,8 +1155,10 @@ declare
 begin
   if v_uid is null then raise exception 'not signed in'; end if;
   v_st := settle_job(p_job);
-  delete from crews where job_id = p_job and player_id = v_uid and contractor_until is null;
-  select count(*) into v_n from crews where job_id = p_job;
+  delete from crews
+   where job_id = p_job and player_id = v_uid
+     and contractor_until is null and return_at is null;
+  select count(*) into v_n from crews where job_id = p_job and return_at is null;
   update job_state set crew_count = v_n where job_id = p_job returning * into v_st;
   return v_st;
 end $$;
@@ -1166,7 +1201,8 @@ begin
   v_st := settle_job(p_job);
 
   select count(*) into v_n from crews
-   where job_id = p_job and player_id = v_uid and contractor_until is null and arrives_at > now();
+   where job_id = p_job and player_id = v_uid and contractor_until is null
+     and return_at is null and arrives_at > now();
   if v_n = 0 then raise exception 'no crew of yours is still on the road to that job'; end if;
 
   perform spend(v_uid, 75, 'a hot-shot dispatch');
@@ -1195,7 +1231,7 @@ begin
 
   select count(*) into v_n from crews
    where job_id = p_job and player_id = v_uid and contractor_until is null
-     and (boost_until is null or boost_until <= now());
+     and return_at is null and (boost_until is null or boost_until <= now());
   if v_n = 0 then raise exception 'no un-boosted crew of yours on that job'; end if;
 
   perform spend(v_uid, 150, 'a double shift');
@@ -1309,6 +1345,18 @@ $$;
 -- ============================================================================
 -- Scheduled work (pg_cron) — the replacement for the old setInterval timers
 -- ============================================================================
+
+/** Crews that have reached their garage are available again. */
+create or replace function retire_returned_crews()
+returns integer
+language plpgsql security definer set search_path = public
+as $$
+declare v_n integer;
+begin
+  delete from crews where return_at is not null and return_at <= now();
+  get diagnostics v_n = row_count;
+  return v_n;
+end $$;
 
 create or replace function sweep_jobs()
 returns integer
@@ -1648,7 +1696,7 @@ begin
 exception when others then null;
 end $$;
 
-select cron.schedule('roadworks-sweep',     '* * * * *',   $$select sweep_jobs(); select expire_incidents();$$);
+select cron.schedule('roadworks-sweep',     '* * * * *',   $$select sweep_jobs(); select expire_incidents(); select retire_returned_crews();$$);
 select cron.schedule('roadworks-incidents', '*/2 * * * *', $$select spawn_incident();$$);
 select cron.schedule('roadworks-prune',     '17 4 * * *',  $$select prune_history();$$);
 
@@ -1677,7 +1725,8 @@ begin
     'mark_milestone_jobs(date)',
     'prune_history()',
     'award(uuid,text,text,text,date,boolean)',
-    'check_commendations(uuid,date)']
+    'check_commendations(uuid,date)',
+    'retire_returned_crews()']
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f);
   end loop;

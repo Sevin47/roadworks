@@ -88,7 +88,9 @@
     if (!job || !st) return { progress: 0, working: 0, done: false };
     if (st.done) return { progress: Number(job.effort), working: 0, done: true };
 
-    const crews = [...state.crews.values()].filter((c) => c.job_id === jobId);
+    // A crew heading back to its garage is still on the roster but off the job.
+    const crews = [...state.crews.values()]
+      .filter((c) => c.job_id === jobId && !c.return_at);
     const now = serverNow();
     let progress = Number(st.progress);
     let cursor = Date.parse(st.progress_at);
@@ -134,7 +136,7 @@
     if (!job || !working || working < (job.min_crews || 1)) return 0;
     const now = serverNow();
     const sum = [...state.crews.values()]
-      .filter((c) => c.job_id === jobId && Date.parse(c.arrives_at) <= now &&
+      .filter((c) => c.job_id === jobId && !c.return_at && Date.parse(c.arrives_at) <= now &&
                      (!c.contractor_until || Date.parse(c.contractor_until) > now))
       .reduce((s, c) => s + Number(c.rate || BASE_RATE) *
                             (c.boost_until && Date.parse(c.boost_until) > now ? 2 : 1), 0);
@@ -679,9 +681,12 @@
       if (!job || !job.centroid) continue;
       seen.add(c.id);
 
-      const start = Date.parse(c.dispatched_at);
-      const end = Date.parse(c.arrives_at);
-      const t = end > start ? Math.max(0, Math.min(1, (now - start) / (end - start))) : 1;
+      const homeward = !!c.return_at;
+      const start = Date.parse(homeward ? c.return_from : c.dispatched_at);
+      const end = Date.parse(homeward ? c.return_at : c.arrives_at);
+      const raw = end > start ? Math.max(0, Math.min(1, (now - start) / (end - start))) : 1;
+      // Heading home retraces the same road, so walk the route backwards.
+      const t = homeward ? 1 - raw : raw;
       const route = Array.isArray(c.route) && c.route.length > 1 ? c.route : null;
 
       let pos;
@@ -696,12 +701,15 @@
 
       const mineCrew = c.player_id === state.me?.id;
       const boosted = c.boost_until && Date.parse(c.boost_until) > now;
-      const phase = t >= 1 ? 'work' : 'drive';
+      const phase = homeward ? 'home' : t >= 1 ? 'work' : 'drive';
 
       // Heading, so a driving truck actually points down the road it is on.
       let heading = 0;
-      if (phase === 'drive') {
-        const ahead = route ? pointAlong(route, Math.min(1, t + 0.02)) : job.centroid;
+      if (phase !== 'work') {
+        const step = homeward ? -0.02 : 0.02;
+        const ahead = route
+          ? pointAlong(route, Math.max(0, Math.min(1, t + step)))
+          : (homeward ? null : job.centroid);
         if (ahead) {
           heading = Math.atan2(ahead[0] - pos[0], ahead[1] - pos[1]) * 180 / Math.PI;
         }
@@ -709,14 +717,14 @@
       const html = crewMarkerHtml(phase, heading, mineCrew, !!c.contractor_until, boosted);
 
       // The road the crew is actually driving, shown while it drives.
-      if (route && mineCrew && t < 1) {
+      if (route && mineCrew && !homeward && t < 1) {
         let rl = layers.routes.get(c.id);
         if (!rl) {
           rl = L.polyline(route.map((p) => [p[1], p[0]]),
             { color: '#ffb703', weight: 2, opacity: 0.55, dashArray: '4,6' }).addTo(map);
           layers.routes.set(c.id, rl);
         }
-      } else if (t >= 1) dropRoute(c.id);
+      } else dropRoute(c.id);
 
       let mk = layers.crews.get(c.id);
       if (!mk) {
@@ -756,7 +764,7 @@
     const fill = contractor ? '#b892ff' : mine ? '#ffb703' : '#4cc9f0';
     const cls = ['crew-pin', phase, mine ? 'mine' : '', boosted ? 'boosted' : ''].join(' ');
 
-    if (phase === 'drive') {
+    if (phase === 'drive' || phase === 'home') {
       // Truck seen from above, nose up; the wrapper rotates it to the heading.
       return `<div class="${cls}" style="--rot:${heading}deg;--pin:${fill}">
         <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
@@ -880,7 +888,11 @@
       ? `<b>★ County quota met</b> — 5 closed in ${esc(me.county)}`
       : `County quota <b>${home}/5</b> in ${esc(me.county)}` +
         `<span class="qbar"><span style="width:${(home / 5) * 100}%"></span></span>`;
+    const homeward = myCrews().filter((c) => c.return_at).length;
     $('crewCount').textContent = `${myCrews().length}/${maxCrews()}`;
+    $('crewCount').title = homeward
+      ? `${plural(homeward, 'crew is', 'crews are')} returning to the garage`
+      : 'Crews out of the garage';
     $('garageBtn').hidden = myRankIdx() < 4;
   }
 
@@ -889,7 +901,8 @@
     const now = serverNow();
     return [...state.crews.values()]
       .filter((c) => c.player_id === state.me?.id)
-      .map((c) => `${c.id}${Date.parse(c.arrives_at) <= now ? 'w' : 't'}${c.convoy ? 'c' : ''}` +
+      .map((c) => `${c.id}${c.return_at ? 'h' : Date.parse(c.arrives_at) <= now ? 'w' : 't'}` +
+                  `${c.convoy ? 'c' : ''}` +
                   `${c.boost_until && Date.parse(c.boost_until) > now ? 'b' : ''}`)
       .join('|');
   }
@@ -909,14 +922,20 @@
 
   function crewStatusText(c, now) {
     const j = state.jobs.get(c.job_id);
+    const fac = state.facilities.find((f) => f.id === c.facility_id);
+
+    if (c.return_at) {
+      const back = Math.max(0, Math.ceil((Date.parse(c.return_at) - now) / 1000));
+      return `job done · returning to ${fac ? fac.name : 'the garage'} — ${back}s`;
+    }
+
     const eta = Math.ceil((Date.parse(c.arrives_at) - now) / 1000);
     const { progress } = liveProgress(c.job_id);
     const pct = j ? Math.round((progress / Number(j.effort)) * 100) : 0;
     const boosted = c.boost_until && Date.parse(c.boost_until) > now;
-    const fac = state.facilities.find((f) => f.id === c.facility_id);
     const head = j ? `${j.route_label} · ` : '';
     return eta > 0
-      ? `${head}${c.convoy ? '🚗💨 convoy · ' : ''}en route ${eta}s${fac ? ` from ${fac.name}` : ''}`
+      ? `${head}${c.convoy ? 'convoy · ' : ''}en route ${eta}s${fac ? ` from ${fac.name}` : ''}`
       : `${head}${boosted ? '⚡ double shift · ' : ''}working ${pct}%`;
   }
 
@@ -934,14 +953,16 @@
     list.innerHTML = mine.map((c) => {
       const j = state.jobs.get(c.job_id);
       const arrived = Date.parse(c.arrives_at) <= now;
-      return `<div class="crew ${arrived ? 'working' : 'travel'} ${c.contractor_until ? 'contractor' : ''}"
+      const cls = c.return_at ? 'homeward' : arrived ? 'working' : 'travel';
+      return `<div class="crew ${cls} ${c.contractor_until ? 'contractor' : ''}"
                    data-crew="${esc(c.id)}">
         <span class="dot"></span>
         <span class="who">
           <span class="act">${c.contractor_until ? '🚜 ' : ''}${esc(j ? j.activity : 'Unknown')}</span>
           <span class="meta">${esc(crewStatusText(c, now))}</span>
         </span>
-        ${c.contractor_until ? '' : `<button title="Recall crew" data-recall="${esc(c.job_id)}">✕</button>`}
+        ${c.contractor_until || c.return_at
+          ? '' : `<button title="Recall crew" data-recall="${esc(c.job_id)}">✕</button>`}
       </div>`;
     }).join('');
   }
@@ -1039,7 +1060,7 @@
     if (!j) return '';
     const st = state.stateById.get(j.id);
     const now = serverNow();
-    const jobCrews = [...state.crews.values()].filter((c) => c.job_id === j.id);
+    const jobCrews = [...state.crews.values()].filter((c) => c.job_id === j.id && !c.return_at);
     const myCrew = jobCrews.find((c) => c.player_id === state.me?.id && !c.contractor_until);
     const { working } = liveProgress(j.id);
     return [
@@ -1090,12 +1111,12 @@
     const effort = Number(j.effort);
     const pct = Math.min(100, (progress / effort) * 100);
     const now = serverNow();
-    const jobCrews = [...state.crews.values()].filter((c) => c.job_id === j.id);
+    const jobCrews = [...state.crews.values()].filter((c) => c.job_id === j.id && !c.return_at);
     const myCrew = jobCrews.find((c) => c.player_id === state.me?.id && !c.contractor_until);
     const myContractor = jobCrews.some((c) => c.player_id === state.me?.id && c.contractor_until);
     const full = myCrews().length >= maxCrews();
     const eta = etaSeconds(j.id);
-    const helpers = [...new Set(jobCrews.map((c) => c.player_name))];
+    const helpers = [...new Set(jobCrews.filter((c) => !c.return_at).map((c) => c.player_name))];
     const away = state.me && !dispatchable(j);
     const fac = state.facilities.find((f) => f.id === myCrew?.facility_id) || nearestFacility(j);
     const ot = myRankIdx() >= 3;

@@ -281,6 +281,8 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .job.away { opacity: .45; }
 .job.away .t::after { content: ' 🔒'; font-size: 11px; }
 .crew.contractor { border-style: dashed; }
+.crew.homeward { opacity: .7; }
+.crew.homeward .dot { background: var(--dim); box-shadow: none; }
 .ticker .overtime, .ticker .equipment { color: var(--accent); }
 .ticker .report-card { color: var(--accent); font-weight: 600; }
 
@@ -304,7 +306,12 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .crew-pin-wrap { background: none; border: 0; }
 .crew-pin { width: 26px; height: 26px; display: block; }
 .crew-pin svg { display: block; overflow: visible; }
-.crew-pin.drive svg { transform: rotate(var(--rot, 0deg)); transition: transform .25s linear; }
+.crew-pin.drive svg,
+.crew-pin.home svg { transform: rotate(var(--rot, 0deg)); transition: transform .25s linear; }
+/* Deadheading home: same truck, dimmed, so a full map still reads at a glance. */
+.crew-pin.home { opacity: .55; }
+.crew-pin.home .body { fill: var(--dim); }
+.crew-pin.home .halo { stroke: var(--dim); stroke-dasharray: 3 2; }
 .crew-pin .halo { fill: #0d1117; fill-opacity: .72; stroke: var(--pin); stroke-width: 1.4; }
 .crew-pin .body { fill: var(--pin); }
 .crew-pin .glass { fill: #0d1117; fill-opacity: .8; }
