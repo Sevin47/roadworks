@@ -1345,6 +1345,28 @@ begin
   update players set last_seen = now() where id = v_uid;
 end $$;
 
+/*
+ * Delete your own account and everything attached to it.
+ *
+ * Player-facing (a manager can retire), and it is also how automated checks
+ * clean up after themselves. Test accounts used to be removed by hand-written
+ * DELETEs against auth.users, and one of those - `where p.id = u.id and name
+ * like 'X%' or name in (...)` - lost its join to operator precedence and wiped
+ * every account on the board. A function that can only ever touch auth.uid()
+ * cannot make that mistake.
+ */
+create or replace function delete_my_account()
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_uid uuid := auth.uid();
+begin
+  if v_uid is null then return; end if;
+  delete from crews where player_id = v_uid;
+  -- players, contributions, player_day and commendations all cascade from here.
+  delete from auth.users where id = v_uid;
+end $$;
+
 create or replace function heartbeat()
 returns void language sql security definer set search_path = public as $$
   update players set last_seen = now() where id = auth.uid();
