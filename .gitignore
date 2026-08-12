@@ -10,3 +10,5 @@ _*.mjs
 supabase_db_pass.txt
 *_pass*.txt
 *secret*
+nws.json
+fac.json
