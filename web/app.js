@@ -71,6 +71,11 @@
     attribution: '&copy; OpenStreetMap, &copy; CARTO | work orders: WV511 | routes: WVDOT GIS | driving: OSRM'
   }).addTo(map);
 
+  // County storm tints belong under the work orders and garages. A dedicated
+  // pane below overlayPane (400) does that by z-index, rather than depending on
+  // insertion order or restacking layers after every redraw.
+  map.createPane('storms').style.zIndex = 350;
+
   // ------------------------------------------------------------ progress math
   const multiplier = (n) => (n <= 0 ? 0 : Math.min(3.0, 1 + 0.12 * (n - 1)));
 
@@ -214,12 +219,15 @@
     for (const c of crews || []) state.crews.set(c.id, c);
     (feed || []).reverse().forEach(pushFeed);
 
-    for (const j of state.jobs.values()) upsertJobLayer(j);
-    drawFacilities();
-    drawStorms();
-    buildLegend();
-    fillCountySelect();
-    fillFilters();
+    // Decoration must never be able to stop the game from starting. A single
+    // bad draw call used to take the whole board down with it.
+    for (const step of [
+      () => { for (const j of state.jobs.values()) upsertJobLayer(j); },
+      drawFacilities, drawStorms, buildLegend, fillCountySelect, fillFilters
+    ]) {
+      try { step(); } catch (err) { console.error(`startup step failed: ${err.message}`, err); }
+    }
+
     subscribe();
     await refreshPlayers();
 
@@ -556,6 +564,7 @@
       if (!county?.geom) continue;
       const sty = STORM_STYLE[st.kind] || STORM_STYLE.other;
       L.polygon(county.geom.map((pt) => [pt[1], pt[0]]), {
+        pane: 'storms',
         color: sty.color,
         weight: st.level >= 2 ? 2 : 1,
         opacity: st.level >= 2 ? 0.85 : 0.4,
@@ -566,7 +575,6 @@
       }).addTo(g);
     }
     layers.storms = g.addTo(map);
-    if (layers.facilities) layers.facilities.bringToFront();
     renderStormBar();
   }
 
