@@ -6,7 +6,7 @@ data/
 .DS_Store
 Thumbs.db
 web/config.js
-_verify.mjs
+_*.mjs
 supabase_db_pass.txt
 *_pass*.txt
 *secret*
