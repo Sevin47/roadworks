@@ -15,178 +15,237 @@ Hard constraints every mechanic must respect:
    on top of short sessions, never instead of them.
 4. **One shared board.** No instancing, no private content. Scarcity (who closes what)
    is the multiplayer.
+5. **Slow reveal.** New players see exactly today's game: map, dispatch, leaderboard.
+   Every added system is rank-gated *in the UI itself* — the overtime button does not
+   render until Foreman, the garage until County Supervisor. Complexity is the reward
+   for staying, never the price of starting.
 
 ---
 
-## 1. The three currencies
+## 1. Territory: county identity, district turf
+
+- **Your county is who you are.** Chosen at signup; it's your name tag, your HQ, and
+  your travel origin.
+- **Your district is where you work.** Jobs are dispatchable anywhere in your WVDOH
+  district. Jobs outside it don't offer a dispatch button (grayed, "outside D4").
+- **Home-county bonus:** +25% XP on jobs in your own county, so you patrol your own
+  turf first and fan out second.
+- **Incidents are statewide.** Any incident, anywhere, is fair game for everyone —
+  emergencies don't respect district lines and neither do we.
+
+Why district and not a hard county lock: the reports are organized by maintenance HQ
+and crews genuinely work across county lines (the reports themselves note it). More
+practically, on a typical day **15 of 55 counties have fewer than 6 work orders** —
+Hancock and Upshur have had exactly 1 — and a county-locked player there has nothing
+to do by 9am. District turf also lets coworkers who picked different counties still
+pile onto the same job, which is the whole game. County pride stays (bonus, report
+card, leaderboard grouping); county walls don't.
+
+Implementation: one `where` clause in `dispatch_crew()` (`player.district =
+job.district OR job.incident`), plus the XP bonus factor at payout.
+
+## 2. The three currencies
 
 | | Earned by | Spent on | Resets |
 |---|---|---|---|
 | **XP** | Closing jobs | Never spent — drives Rank | Never |
-| **Budget ($)** | Closing jobs | Overtime, equipment, bids | Never |
-| **Commendations (★)** | Daily/weekly goals, SLA saves | Prestige cosmetics + county perks | Never |
+| **Budget ($)** | Closing jobs | Overtime, equipment | Never |
+| **Commendations (★)** | Daily/weekly goals, SLA saves, storms | Prestige cosmetics + county perks | Never |
 
 XP is the *treadmill*, budget is the *decisions*, commendations are the *trophies*.
-Today budget has no sink and XP has one effect (crew count) — fixing that is Phase 1.
 
-## 2. Progression: Career Ranks
+## 3. Pace
 
-Replace the bare level number with WVDOT-flavored ranks. Same XP curve underneath,
-rebalanced so the top is reachable in a season of casual play (~2 months of breaks):
+Base work rate drops to **0.5 units/sec per crew** (half the launch rate). A routine
+maintenance job runs ~2 min solo, ~45 s with a 4-crew pile-on; the day's big
+construction jobs become genuine 15–30 minute crowd efforts. Rationale: closes should
+feel earned, the board should never run dry mid-afternoon, and the crowd multiplier
+reads better when solo work is visibly slow.
+
+Tuning note: rate, equipment prices, and cert thresholds are three knobs that all
+lengthen the grind. Rate and prices are set deliberately conservative here; **revisit
+all three against live `day_scores` after the first real week** rather than stacking
+guesses.
+
+## 4. Progression: Career Ranks
+
+WVDOT-flavored ranks on a curve a casual break-room player can *finish* in a season
+(~2–3 months), with the UI revealing systems as they're earned:
 
 | Rank | XP | Unlocks |
 |---|---|---|
 | Flagger | 0 | 3 crews |
 | Crew Leader | 40 | 4th crew |
-| Foreman | 160 | Overtime button |
-| County Supervisor | 400 | 5th crew, equipment garage |
+| Foreman | 160 | Overtime button appears |
+| County Supervisor | 400 | 5th crew, equipment garage appears |
 | Maintenance Superintendent | 800 | Specialist certification slot 1 |
-| County Administrator | 1,400 | 6th crew, project bidding |
-| District Engineer | 2,200 | Specialist slot 2, district fund access |
-| Deputy Commissioner | 3,200 | 7th crew |
-| **Commissioner of Highways** | 4,500 | 8th crew, gold name in feed, prestige |
+| County Administrator | 1,400 | 6th crew |
+| District Engineer | 2,200 | Specialist slot 2 |
+| State Highway Engineer | 3,200 | 7th crew |
+| Deputy Commissioner | 4,400 | +10% budget payouts |
+| **Commissioner of Highways** | 5,800 | 8th crew, gold name in feed, prestige |
 
-- New curve: `xp(rank)` table above instead of `40·(n−1)²` (the old curve put crew
-  #12 at 11,560 XP — decorative, not aspirational).
-- **Prestige ("Transfer")**: at Commissioner, optionally transfer to a new county.
-  XP resets, you keep equipment + commendations, gain a permanent +2% work rate
-  (stacking, cap +10%), and your name gets a service stripe. Leaderboard flavor:
-  "Commissioner (2nd term)".
+- **Prestige ("Transfer")**: at Commissioner, optionally transfer to a new county
+  (new district = genuinely new board). XP resets, you keep equipment and
+  commendations, gain a permanent +2% work rate (stacking, cap +10%), and a service
+  stripe: "Commissioner (2nd term)".
 
 ### Specialist certifications
 
-Earned by *doing*, not buying: close 15 Bridge jobs → **Bridge Certified** (+25% work
-rate on Bridge category, crew icon gets a hard hat variant). One track per category.
-Equipped in limited slots (1–2), so players differentiate: the bridge person, the
-incident-response person. Encourages *complementary* dispatching — a certified
-specialist joining your job speeds it up more, which deepens rule #2 instead of
-violating it.
+Earned by doing, not buying — and rare enough to mean something. Thresholds scale
+with how often each category actually appears in the reports (Bridge runs ~11 rows
+per day *statewide*; Maintenance runs ~400):
 
-Implementation: `certifications` table, counted from a `job_completions` log the
-payout loop already effectively has (`contributions` at close time); equip is an RPC.
+| Certification | Closes required | Effect |
+|---|---|---|
+| Maintenance | 75 | +25% rate on Maintenance |
+| Closures | 40 | +25% rate on Closures |
+| Construction | 30 | +25% rate on Construction Projects |
+| Utilities | 25 | +25% rate on Utilities/Oil & Gas |
+| Heavy Maintenance | 20 | +25% rate on Heavy Maintenance |
+| Bridge | 20 | +25% rate on Bridge |
+| Incident Response | 50 | +25% rate on Incidents |
+| Winter Ops | 40 (winter rows) | +25% rate on Winter Ops |
 
-## 3. Budget: what money is for
+Limited equip slots (1 at Superintendent, 2 at District Engineer) force identity:
+the bridge person, the storm chaser. A certified specialist joining your job speeds
+it up more than a generalist — cooperation gets *deeper*, not just wider.
 
-Three sinks, in order of build priority:
+## 5. Budget: what money is for
 
-### 3a. Overtime (moment-to-moment sink)
-- **Hot-shot dispatch** ($75): this crew travels instantly. Button next to Dispatch.
-- **Double shift** ($150): one crew works at 2× for the next 10 minutes. Lazy-accrual
-  friendly: store `boost_until` on the crew row; `settle_job()` already integrates
-  piecewise spans, a boost is just another rate change at a timestamp.
-- **Emergency contractor** ($400): a temporary 4th-party crew (NPC) on one job for
-  15 minutes. Counts toward the crowd multiplier — buys the *feeling* of a pile-on
-  when you're playing alone at 7am.
+Two sinks. (Project bidding was considered and cut — auction mechanics on day one is
+exactly the too-much-too-soon complexity rule #5 exists to prevent.)
 
-### 3b. Equipment garage (session-to-session sink)
-Permanent, per-player, purchase once:
+### 5a. Overtime (moment-to-moment, unlocked at Foreman)
+- **Hot-shot dispatch** ($75): this crew travels instantly.
+- **Double shift** ($150): one crew works at 2× for 10 minutes. Lazy-accrual
+  friendly: `boost_until` on the crew row is just another rate-change timestamp in
+  `settle_job()`'s span walk.
+- **Emergency contractor** ($400): a temporary NPC crew on one job for 15 minutes.
+  Counts toward the crowd multiplier — buys the *feeling* of a pile-on when you're
+  the only one on at 7am.
+
+### 5b. Equipment garage (permanent, unlocked at County Supervisor)
 
 | Item | Cost | Effect |
 |---|---|---|
-| Crew-cab pickup | $800 | −25% travel time |
-| Equipment trailer | $1,500 | +10% work rate, all categories |
-| Mobile message board | $1,200 | +20% XP from Closures |
-| Thermal patcher | $2,000 | +30% rate on Maintenance |
-| Under-bridge rig | $3,500 | +30% rate on Bridge |
-| Milling machine | $5,000 | +30% rate on Construction Projects |
-| **County garage upgrade** | $10,000 | 9th crew (the only crew money can buy) |
+| Crew-cab pickup | $2,000 | −25% travel time |
+| Equipment trailer | $3,500 | +10% work rate, all categories |
+| Mobile message board | $3,000 | +20% XP from Closures |
+| Thermal patcher | $5,000 | +30% rate on Maintenance |
+| Under-bridge rig | $8,000 | +30% rate on Bridge |
+| Snow plow rig | $8,000 | +30% rate on Winter Ops |
+| Milling machine | $12,000 | +30% rate on Construction Projects |
+| **County garage upgrade** | $25,000 | 9th crew (the only crew money can buy) |
 
-Effects apply as per-player rate multipliers → one more factor in `settle_job()`'s
-span math (rate = Σ per-crew rates × crowd multiplier, instead of n × multiplier).
-That refactor also makes certifications and boosts drop in cleanly.
+At ~$120–520 per close, the first tool is a first-week goal, the garage upgrade is an
+end-game monument. Effects are per-player rate multipliers — one more factor in
+`settle_job()`'s span math (rate = Σ per-crew rates × crowd multiplier instead of
+n × multiplier). That refactor is the keystone: certifications, boosts, equipment,
+and prestige bonuses all drop into the same integral.
 
-### 3c. Project bids (strategic sink)
-Construction Projects (the 40 XP / $520 jobs) become **sealed-bid contracts**: for the
-first 30 minutes after ingest they're locked, players bid budget, lowest-bid-over-
-minimum wins the *prime contractor* slot — double share weighting on that job and
-their name on it in the queue. Everyone can still crew it (rule #2); the prime just
-profits most. Turns the morning report drop into an event.
+## 6. Winter operations
 
-## 4. Daily & weekly loops
+Two layers, both riding on real data:
 
-### Daily (resets with the real report — the game already has a natural day)
-- **Morning standup** (login bonus, flavor-first): "D4 has 86 work orders today."
-  +$100, streak counter. Streaks pay commendations at 5/10/20 days.
-- **County quota**: close 5 jobs in *your* county → ★. Pushes players to spread out
-  before they pile on, then converge.
-- **Incident SLA**: every incident cleared before expiry earns the closers a shared ★
-  bonus. Incidents expiring unattended shows on the district report card.
-- **District report card** (the social hook): at day rollover, each district gets a
-  letter grade — % closed, incident response rate, biggest single job. Posted to the
-  feed. WVDOT people will absolutely trash-talk over this.
+### 6a. The reports already know it's winter
+WVDOH files **Snow Removal & Ice Control (SRIC)** rows in the daily reports all
+winter — plowing, salting, brining, cindering. The parser already passes them
+through untouched. We detect them (`snow|ice|plow|salt|brine|cinder|SRIC` against
+activity + detail) and promote them to a **Winter Ops** category: own color
+(ice blue), own cert track, pay above Maintenance — plowing at 5am deserves it.
+Zero new data plumbing; the category simply lights up when the season does.
+
+### 6b. NWS storm mode (real weather, year-round)
+A scheduled Action polls `api.weather.gov/alerts/active?area=WV` (free, no key)
+every 30 minutes and upserts active alerts into an `alerts` table with their county
+lists (NWS FIPS ↔ our `wv_counties.fips`).
+
+Counties under an active warning enter **storm mode** — tinted on the map, and:
+
+| Real NWS alert | In-game effect |
+|---|---|
+| Winter Storm / Ice Storm / Blizzard Warning | Plow-route incidents spawn on interstates & US routes in affected counties (priority order: I → US → WV, like real plow priority); incident XP ×2; Winter Ops rows there +50% XP |
+| Flood Warning | High Water incidents ×3 spawn rate in affected counties |
+| High Wind Warning | Downed Tree / debris incidents ×3 |
+| Severe Thunderstorm Warning | Signal Outage / debris incidents ×2 |
+
+**Storm-mode incidents are statewide-dispatchable like all incidents — this is when
+the whole state converges on one corner of the map.** When it's actually snowing
+outside the office window, the game lights up. Most on-brand feature we can build.
+
+- **Snowbird ★ commendation**: close 10 Winter Ops/incident jobs during active
+  winter warnings.
+- pg_cron reads the `alerts` table for spawn multipliers; the Action only writes it.
+
+## 7. Daily & weekly loops
+
+### Daily (resets with the real report)
+- **Morning standup**: login flavor + $100, streak counter; ★ at 5/10/20-day streaks.
+- **County quota**: close 5 jobs in your home county → ★ (synergizes with the +25%).
+- **Incident SLA**: incidents cleared before expiry pay the closers a shared ★ bonus;
+  expirations show on the report card.
+- **District report card** (the social hook): at rollover each district gets a letter
+  grade — % closed, incident response rate, biggest job. Posted to the feed. This is
+  the trash-talk engine.
 
 ### Weekly
-- **Focus category** (rotates): all Bridge jobs +50% XP this week. One `game_config`
-  row, zero new UI beyond a banner.
-- **District Cup**: Mon–Fri cumulative district closure %, normalized by district size.
-  Winning district's players each get ★ and a feed banner. This is the *between*-
-  district competition that makes *within*-job cooperation feel like teamwork.
-- **Season** (~8 weeks): leaderboard archives, prestige stripes awarded, one-time
-  cosmetic for top 3 counties.
+- **Focus category** (rotates): e.g. all Bridge jobs +50% XP. One config row.
+- **District Cup**: Mon–Fri cumulative closure %, normalized by district size.
+  Winning district's players each get ★. Between-district competition is what makes
+  within-job cooperation feel like teamwork.
+- **Season** (~8 weeks): boards archive, prestige stripes, cosmetic for top county.
 
-## 5. Interactive gameplay loops (the fun ideas)
+## 8. Interactive gameplay loops
 
 Ranked by bang-for-buck:
 
-1. **Convoy bonus** — two+ crews dispatched to the same job within 60s of each other
-   all travel 40% faster ("rolling convoy"). Rewards the *social* act of saying "hey,
-   everyone hit the Corridor G job" in chat. Trivial: compare `dispatched_at` values.
+1. **Convoy bonus** — crews dispatched to the same job within 60s of each other all
+   travel 40% faster. Makes "everyone hit Corridor G" in chat mechanically real.
+   Trivial: compare `dispatched_at`.
+2. **Job chains** — closing some activities spawns a follow-up on the same geometry:
+   *Bridge Inspection → Deck Repair (found spalling)*, *Debris Removal → Guardrail
+   Repair*. ~15% roll inside `settle_job()`'s completion branch.
+3. **Emergency callouts** — rare big incidents (bridge strike, major slide) needing
+   **3+ crews on site before work starts at all**. Klaxon feed post, map pulse. The
+   one mechanic allowed to *require* cooperation.
+4. **Milestone jobs** — the day's 3 longest jobs get 25/50/75% markers paying small
+   instant bonuses to everyone on site. Long jobs become a march down real geometry.
+5. **Radio pings** — "📻 request backup" posts a one-tap dispatch link to the feed.
+6. **Ghost traffic (later)** — AADT layer (already in WVDOT's REST services) sizes a
+   traffic glow; high-AADT jobs pay a hazard bonus. Texture, near-zero burden.
 
-2. **Storm mode (real weather!)** — poll the free NWS alerts API
-   (`api.weather.gov/alerts/active?area=WV`, no key) from the ingest job or a small
-   scheduled Action every 30 min. Counties under an actual flood/wind/winter warning
-   enter storm mode: incident spawn rate ×3 there, all incident XP ×2, county tinted
-   on the map. When it's genuinely storming outside the office, the game lights up.
-   This is the single most on-brand feature we could add.
+## 9. What we deliberately do NOT build
 
-3. **Job chains** — closing certain activities spawns a follow-up at the same
-   location: *Bridge Inspection → Bridge Deck Repair (found spalling)*, *Debris
-   Removal → Guardrail Repair*. ~15% chance, `on-close` logic inside `settle_job()`.
-   Makes the map feel alive between ingests.
-
-4. **Emergency callouts** — rare big incidents (bridge strike, major slide) that
-   need **minimum 3 crews on site** before work starts at all. A klaxon feed post +
-   map pulse. The only mechanic allowed to *require* cooperation, because demanding
-   it occasionally is what makes the crowd identity legible.
-
-5. **Milestone jobs** — the day's 3 longest jobs get segment markers (25/50/75%),
-   each paying a small instant bonus to everyone on site. Long jobs stop feeling
-   like a wall and start feeling like a march down the actual route geometry.
-
-6. **Radio pings** — click a job → "📻 request backup" posts a one-tap link into the
-   feed. Chat already exists; this makes it *actionable*.
-
-7. **Ghost traffic (ambience, later)** — AADT layer (already in the WVDOT REST
-   services) sizes a subtle traffic glow on routes; jobs on high-AADT routes pay a
-   +hazard bonus. Real data, real texture, zero gameplay burden.
-
-## 6. What we deliberately do NOT build
-
-- **PvP or sabotage** — violates rule #2, and office games sour fast with griefing.
-- **Energy/stamina gates** — the daily report reset is already the pacing mechanism.
+- **Project bidding / auctions** — cut. Economy-on-economy complexity that scares off
+  exactly the slow-easing players this is for. Revisit only if the game outgrows the
+  office.
+- **PvP or sabotage** — violates rule #2; office games sour fast with griefing.
+- **Energy/stamina gates** — the daily report reset is already the pacing.
 - **Real-money anything** — obviously.
-- **Idle/offline auto-play as default** — the emergency contractor is the one
-  sanctioned taste of it; more would hollow out the "dispatch together" identity.
-- **Chasing 100% board completion balance** — 600 jobs/day is *supposed* to be more
-  than the crowd can finish. The board being unbeatable is what makes the district
-  report card and Cup meaningful.
+- **Idle auto-play as default** — the emergency contractor is the one sanctioned
+  taste; more would hollow out the dispatch-together identity.
+- **Balancing toward 100% board completion** — 600 jobs/day is *supposed* to be more
+  than the crowd can finish; that's what makes the report card and Cup meaningful.
 
-## 7. Build order
+## 10. Build order
 
-**Phase 1 — "Money matters" (core refactor + first sinks)**
-`settle_job()` rate refactor (per-crew rates) · overtime ×3 · equipment garage ·
-rank table + curve rebalance · report card at rollover
-*Everything else depends on the rate refactor; do it first while the schema is young.*
+**Phase 1 — "Money matters" (keystone refactor + first sinks)**
+`settle_job()` per-crew-rate refactor · 0.5 rate rebase · district territory rule +
+home-county bonus · rank table (10 ranks) with UI gating · overtime ×3 · equipment
+garage · report card at rollover
 
 **Phase 2 — "Come back tomorrow"**
-Daily quota + streaks · commendations · incident SLA · focus category ·
-convoy bonus · radio pings
+Daily quota + streaks · commendations · incident SLA · focus category · convoy
+bonus · radio pings
 
 **Phase 3 — "The world pushes back"**
-Storm mode (NWS) · job chains · emergency callouts · milestone jobs
+NWS alerts pipeline · storm mode · Winter Ops category + SRIC detection · job
+chains · emergency callouts · milestone jobs
+*(Ship before the first snow — the SRIC rows start appearing in the reports on
+their own.)*
 
 **Phase 4 — "Careers"**
-Certifications · project bidding · District Cup + seasons · prestige transfers ·
-ghost traffic
+Certifications · District Cup + seasons · prestige transfers · ghost traffic
 
-Each phase is shippable alone; each schema change stays idempotent-paste-able.
+Each phase is shippable alone; every schema change stays idempotent-paste-able.
