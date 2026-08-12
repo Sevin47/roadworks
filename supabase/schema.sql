@@ -52,6 +52,11 @@ create table if not exists jobs (
   created_at    timestamptz not null default now()
 );
 
+alter table jobs add column if not exists min_crews integer not null default 1;
+alter table jobs add column if not exists milestone boolean not null default false;
+alter table jobs add column if not exists storm     boolean not null default false;
+alter table jobs add column if not exists parent_id text;
+
 create index if not exists jobs_report_date_idx on jobs (report_date);
 create index if not exists jobs_incident_idx    on jobs (incident) where incident;
 create index if not exists jobs_district_idx    on jobs (district);
@@ -77,8 +82,12 @@ create table if not exists wv_counties (
   code     text primary key,
   name     text not null unique,
   district integer not null,
-  center   jsonb
+  center   jsonb,
+  fips     integer,
+  geom     jsonb          -- simplified outline, used to tint counties under a storm
 );
+alter table wv_counties add column if not exists fips integer;
+alter table wv_counties add column if not exists geom jsonb;
 
 -- Real WVDOT facilities (Transportation/MapServer/4). Crews roll from the
 -- nearest dispatchable one in the player's district — a Boone job draws a crew
@@ -243,6 +252,60 @@ create table if not exists day_report_cards (
   primary key (report_date, district)
 );
 
+-- ----------------------------------------------------------------- weather
+
+-- Live National Weather Service warnings, refreshed by a scheduled job.
+-- `intensity` is what the game reads: a Warning is a real event, a Watch is a
+-- nudge, an Advisory is only a tint. Without the tiering a single 34-county
+-- Flood Watch would put most of West Virginia into full storm mode at once.
+create table if not exists alerts (
+  id         text primary key,
+  event      text    not null,
+  kind       text    not null,          -- winter | flood | wind | storm | other
+  intensity  integer not null default 0,-- 2 warning, 1 watch, 0 advisory
+  severity   text,
+  headline   text,
+  onset      timestamptz,
+  expires    timestamptz not null,
+  counties   text[]  not null default '{}',
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists alerts_live_idx on alerts (expires) where intensity > 0;
+
+-- Finishing some work uncovers more of it.
+create table if not exists job_chains (
+  id             bigserial primary key,
+  match_pattern  text    not null,      -- ILIKE pattern against the parent activity
+  child_activity text    not null,
+  child_category text    not null,
+  child_detail   text,
+  chance         numeric not null default 0.15,
+  effort_factor  numeric not null default 0.6
+);
+
+insert into job_chains (match_pattern, child_activity, child_category, child_detail, chance, effort_factor)
+select * from (values
+  ('%bridge inspection%',  'Bridge Deck Repair',     'Bridge',            'Inspection found spalling on the deck.',        0.35, 0.8),
+  ('%debris removal%',     'Guardrail Repair',       'Heavy Maintenance', 'Guardrail damaged behind the debris.',          0.18, 0.6),
+  ('%dead deer%',          'Litter Pickup and Disposal','Maintenance',    'Cleanup left behind after the pickup.',         0.12, 0.4),
+  ('%patching%',           'Pavement Marking',       'Maintenance',       'Fresh patch needs its markings restored.',      0.22, 0.5),
+  ('%ditch%',              'Minor Drainage Structures','Maintenance',     'Ditch work exposed a failing culvert.',         0.20, 0.7),
+  ('%mowing%',             'Removing Brush',         'Maintenance',       'Mowing crew flagged heavy brush on the shoulder.',0.15, 0.5),
+  ('%slide%',              'Slope Stabilization',    'Heavy Maintenance', 'Slip is still moving; stabilization required.',  0.30, 1.0),
+  ('%high water%',         'Debris Removal',         'Maintenance',       'Water receded and left debris across the lane.', 0.40, 0.5),
+  ('%snow%',               'Pothole Patching',       'Maintenance',       'Freeze-thaw opened potholes on the plow route.', 0.25, 0.5)
+) v(a,b,c,d,e,f)
+where not exists (select 1 from job_chains);
+
+-- Segment bonuses on the day's biggest jobs.
+create table if not exists job_milestones (
+  job_id  text    not null references jobs(id) on delete cascade,
+  pct     integer not null,
+  paid_at timestamptz not null default now(),
+  primary key (job_id, pct)
+);
+
 -- --------------------------------------------------------------- equipment
 
 create table if not exists equipment_catalog (
@@ -293,7 +356,8 @@ begin
   foreach t in array array[
     'game_day','wv_counties','facilities','ranks','jobs','job_state','players',
     'crews','contributions','route_cache','feed','day_scores',
-    'district_day_stats','day_report_cards','equipment_catalog','player_equipment']
+    'district_day_stats','day_report_cards','equipment_catalog','player_equipment',
+    'alerts','job_chains','job_milestones']
   loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists %I on %I', t || '_read', t);
@@ -357,6 +421,35 @@ returns numeric language sql stable as $$
        * (1 + 0.02 * coalesce((select prestige from players where id = p_player), 0));
 $$;
 
+-- ------------------------------------------------------------------ weather
+
+-- Strongest live alert intensity for a county: 2 warning, 1 watch, 0 none.
+create or replace function county_storm_level(p_county_code text)
+returns integer language sql stable as $$
+  select coalesce(max(a.intensity), 0)
+    from alerts a
+   where a.expires > now()
+     and a.intensity > 0
+     and p_county_code = any(a.counties);
+$$;
+
+create or replace function county_storm_kind(p_county_code text)
+returns text language sql stable as $$
+  select a.kind from alerts a
+   where a.expires > now() and a.intensity > 0 and p_county_code = any(a.counties)
+   order by a.intensity desc, a.expires desc limit 1;
+$$;
+
+-- Counties currently in play for storm effects, strongest first.
+create or replace view storm_counties as
+  select c.code, c.name, c.district,
+         county_storm_level(c.code) as level,
+         county_storm_kind(c.code)  as kind
+    from wv_counties c
+   where county_storm_level(c.code) > 0;
+
+grant select on storm_counties to authenticated;
+
 -- ----------------------------------------------------------------------------
 -- settle_job: the replacement for the old server tick.
 --
@@ -370,7 +463,7 @@ $$;
 create or replace function settle_job(p_job text)
 returns job_state
 language plpgsql security definer set search_path = public
-as $$
+as $BODY$
 declare
   v_job     jobs%rowtype;
   v_st      job_state%rowtype;
@@ -390,6 +483,11 @@ declare
   v_xp      integer;
   v_pay     integer;
   v_names   text;
+  v_before  numeric;
+  v_ms      integer;
+  v_bxp     integer;
+  v_chain   record;
+  v_child   text;
 begin
   select * into v_job from jobs where id = p_job;
   if not found then return null; end if;
@@ -399,6 +497,7 @@ begin
   if v_st.done then return v_st; end if;
 
   v_cursor := v_st.progress_at;
+  v_before := v_st.progress;
 
   for v_ev in
     select t from (
@@ -426,7 +525,8 @@ begin
 
     v_dt := extract(epoch from (v_ev.t - v_cursor));
 
-    if v_n > 0 and v_dt > 0 then
+    -- An emergency callout produces nothing until enough crews are on site.
+    if v_n >= v_job.min_crews and v_n > 0 and v_dt > 0 then
       v_mult := crew_multiplier(v_n);
       v_rate := v_sum * v_mult;
       v_gain := v_rate * v_dt;
@@ -460,6 +560,31 @@ begin
   -- Hired contractors go home once their shift is up.
   delete from crews where job_id = p_job and contractor_until <= v_now;
 
+  -- Segment bonuses on the day's biggest jobs: everyone on site is paid as the
+  -- work marches past each quarter of the real route.
+  if v_job.milestone and v_st.progress > v_before then
+    v_bxp := greatest(1, round(v_job.xp_award * 0.25)::int);
+    foreach v_ms in array array[25, 50, 75] loop
+      if v_before < v_job.effort * v_ms / 100.0
+         and v_st.progress >= v_job.effort * v_ms / 100.0
+         and not exists (select 1 from job_milestones where job_id = p_job and pct = v_ms) then
+        insert into job_milestones (job_id, pct) values (p_job, v_ms) on conflict do nothing;
+        update players p
+           set xp       = p.xp + v_bxp,
+               day_xp   = case when p.day_date = v_job.report_date then p.day_xp + v_bxp else v_bxp end,
+               day_date = v_job.report_date,
+               funds    = p.funds + round(v_job.pay_award * 0.15)::int,
+               level    = rank_for(p.xp + v_bxp)
+         where p.id in (select distinct c.player_id from crews c
+                         where c.job_id = p_job and c.arrives_at <= v_now);
+        insert into feed (report_date, kind, body)
+        values (v_job.report_date, 'milestone',
+                v_ms || '% marker reached on ' || v_job.activity || ' (' ||
+                coalesce(v_job.route_label, '?') || ') - bonus paid to every crew on site.');
+      end if;
+    end loop;
+  end if;
+
   select count(*) into v_n from crews where job_id = p_job and arrives_at <= v_now;
 
   if v_st.progress >= v_job.effort then
@@ -477,6 +602,8 @@ begin
                 v_job.xp_award
                 * (0.6 + 0.4 * v_frac)
                 * (case when v_job.incident then 1.4 else 1 end)
+                -- Storm work pays double: this is when the state actually needs it.
+                * (case when v_job.storm then 2.0 else 1 end)
                 -- Patrol your own turf: home county work pays better.
                 * (case when v_c.county_code is not null
                           and v_c.county_code = v_job.county_code then 1.25 else 1 end)
@@ -517,6 +644,33 @@ begin
             case when v_job.incident then 'incident-cleared' else 'complete' end,
             coalesce(v_names, 'A crew') || ' completed ' || v_job.activity ||
             ' on ' || coalesce(v_job.route_label, '?') || ' (' || v_job.county || ' Co.)');
+
+    -- Finishing some work uncovers more of it.
+    if not v_job.incident and v_job.parent_id is null then
+      select * into v_chain from job_chains
+       where v_job.activity ilike match_pattern
+       order by random() limit 1;
+      if found and random() < v_chain.chance then
+        v_child := 'chain-' || replace(gen_random_uuid()::text, '-', '');
+        insert into jobs (
+          id, report_date, district, county, county_code, category, activity,
+          route_type, route_label, route_name, bmp, emp, start_time, end_time, detail,
+          miles, approx, incident, coords, centroid, effort, xp_award, pay_award, parent_id)
+        select v_child, v_job.report_date, v_job.district, v_job.county, v_job.county_code,
+               v_chain.child_category, v_chain.child_activity,
+               v_job.route_type, v_job.route_label, v_job.route_name, v_job.bmp, v_job.emp,
+               to_char(now(), 'FMHH12:MI AM'), v_job.end_time, v_chain.child_detail,
+               v_job.miles, v_job.approx, false, v_job.coords, v_job.centroid,
+               greatest(30, round(v_job.effort * v_chain.effort_factor)),
+               v_job.xp_award, v_job.pay_award, p_job;
+        insert into job_state (job_id) values (v_child);
+        insert into feed (report_date, kind, body)
+        values (v_job.report_date, 'chain',
+                'Follow-up opened: ' || v_chain.child_activity || ' on ' ||
+                coalesce(v_job.route_label, '?') || ' (' || v_job.county || ' Co.) - ' ||
+                coalesce(v_chain.child_detail, ''));
+      end if;
+    end if;
   else
     update job_state
        set progress = v_st.progress, progress_at = v_now, crew_count = v_n
@@ -525,7 +679,7 @@ begin
   end if;
 
   return v_st;
-end $$;
+end $BODY$;
 
 -- ============================================================================
 -- Player actions
@@ -920,32 +1074,34 @@ end $$;
 -- Live incidents ride on real route geometry: a random scheduled work order
 -- donates one of its segments, so a rock slide lands on a road that actually
 -- exists at a milepoint WVDOT actually reports.
+--
+-- When the National Weather Service has West Virginia counties under a warning,
+-- incidents concentrate there, take their character from the weather, and pay
+-- double. Winter warnings put them on plow priority: interstates first, then US
+-- routes, then WV routes -- the order WVDOH actually clears in.
 create or replace function spawn_incident()
 returns text
 language plpgsql security definer set search_path = public
-as $$
+as $BODY$
 declare
-  v_src   jobs%rowtype;
-  v_day   date;
-  v_live  integer;
-  v_kind  text;
-  v_note  text;
-  v_i     integer;
-  v_k     integer;
-  v_seg   jsonb;
-  v_id    text;
-  v_kinds text[] := array[
-    'Rock Slide','Downed Tree','High Water','Crash Debris',
-    'Signal Outage','Guardrail Strike','Sinkhole','Slip / Slide'];
-  v_notes text[] := array[
-    'Rock and debris in the roadway - dispatch to clear.',
-    'Tree across both lanes after storm activity.',
-    'Water over the roadway; signs and barricades needed.',
-    'Secondary cleanup requested by responders.',
-    'Dark signal - temporary stop control required.',
-    'Damaged guardrail needs emergency repair.',
-    'Pavement failure reported; lane closure in place.',
-    'Embankment slip encroaching on the travel lane.'];
+  v_src     jobs%rowtype;
+  v_day     date;
+  v_live    integer;
+  v_kind    text;
+  v_note    text;
+  v_i       integer;
+  v_k       integer;
+  v_seg     jsonb;
+  v_id      text;
+  v_storm   record;
+  v_online  integer;
+  v_callout boolean := false;
+  v_minc    integer := 1;
+  v_effort  numeric := 30;
+  v_xp      integer := 34;
+  v_pay     integer := 430;
+  v_kinds   text[];
+  v_notes   text[];
 begin
   select max(report_date) into v_day from game_day;
   if v_day is null then return null; end if;
@@ -955,39 +1111,129 @@ begin
    where j.incident and not s.done;
   if v_live >= 14 then return null; end if;
 
-  select * into v_src from jobs
-   where report_date = v_day and not incident and jsonb_array_length(coords) > 1
-   order by random() limit 1;
-  if not found then return null; end if;
+  -- Is anywhere in the state under active weather right now?
+  select * into v_storm from storm_counties order by level desc, random() limit 1;
 
-  v_i := 1 + floor(random() * (jsonb_array_length(v_src.coords) - 1))::int;
-  v_seg := jsonb_build_array(v_src.coords->(v_i - 1), v_src.coords->v_i);
+  if v_storm.code is not null and random() < (case when v_storm.level >= 2 then 0.8 else 0.45 end) then
+    -- Storm-driven: pull a donor segment from the affected county, favouring
+    -- the routes that actually get cleared first.
+    select * into v_src from jobs
+     where report_date = v_day and not incident
+       and county_code = v_storm.code
+       and jsonb_array_length(coords) > 1
+     order by case when v_storm.kind = 'winter' then
+                case route_type when 'I' then 0 when 'US' then 1 when 'WV' then 2 else 3 end
+              else 0 end,
+              random()
+     limit 1;
+  end if;
+
+  if v_src.id is null then
+    v_storm := null;
+    select * into v_src from jobs
+     where report_date = v_day and not incident and jsonb_array_length(coords) > 1
+     order by random() limit 1;
+  end if;
+  if v_src.id is null then return null; end if;
+
+  case coalesce(v_storm.kind, 'none')
+    when 'winter' then
+      v_kinds := array['Snow & Ice Control','Drifting Snow','Black Ice','Plow Route Callout','Stranded Vehicle'];
+      v_notes := array[
+        'Plow and spreader needed - accumulation on the travel lanes.',
+        'Blowing and drifting snow closing the lane.',
+        'Black ice reported; brine and cinders requested.',
+        'Priority plow route has not been cleared this cycle.',
+        'Vehicle stuck in the roadway blocking the plow lane.'];
+    when 'flood' then
+      v_kinds := array['High Water','Slip / Slide','Debris Flow','Washout'];
+      v_notes := array[
+        'Water over the roadway; signs and barricades needed.',
+        'Saturated bank is moving into the travel lane.',
+        'Mud and debris pushed across both lanes.',
+        'Shoulder washed out - lane closure required.'];
+    when 'wind' then
+      v_kinds := array['Downed Tree','Sign Down','Guardrail Strike','Debris in Roadway'];
+      v_notes := array[
+        'Tree across both lanes after storm activity.',
+        'Regulatory sign blown down; replacement needed.',
+        'Damaged guardrail needs emergency repair.',
+        'Wind-blown debris scattered across the lanes.'];
+    when 'storm' then
+      v_kinds := array['Signal Outage','Crash Debris','Downed Tree','Flash Flooding'];
+      v_notes := array[
+        'Dark signal - temporary stop control required.',
+        'Secondary cleanup requested by responders.',
+        'Tree across both lanes after storm activity.',
+        'Fast-rising water across the roadway.'];
+    else
+      v_kinds := array['Rock Slide','Downed Tree','High Water','Crash Debris',
+                       'Signal Outage','Guardrail Strike','Sinkhole','Slip / Slide'];
+      v_notes := array[
+        'Rock and debris in the roadway - dispatch to clear.',
+        'Tree across both lanes after storm activity.',
+        'Water over the roadway; signs and barricades needed.',
+        'Secondary cleanup requested by responders.',
+        'Dark signal - temporary stop control required.',
+        'Damaged guardrail needs emergency repair.',
+        'Pavement failure reported; lane closure in place.',
+        'Embankment slip encroaching on the travel lane.'];
+  end case;
 
   v_k    := 1 + floor(random() * array_length(v_kinds, 1))::int;
   v_kind := v_kinds[v_k];
   v_note := v_notes[v_k];
-  v_id   := 'inc-' || replace(gen_random_uuid()::text, '-', '');
+
+  -- Emergency callouts need a real crowd before work can start, so they only
+  -- appear when there are enough managers on shift to actually answer one.
+  select count(*) into v_online from players where last_seen > now() - interval '6 minutes';
+  if v_online >= 3 and random() < 0.12 then
+    v_callout := true;
+    v_minc    := 3;
+    v_effort  := 180;
+    v_xp      := 90;
+    v_pay     := 1200;
+    v_kind    := 'CALLOUT: ' || v_kind;
+    v_note    := v_note || ' MAJOR EVENT - three crews must be on site before work can begin.';
+  end if;
+
+  if coalesce(v_storm.level, 0) >= 2 then
+    v_effort := v_effort * 1.3;
+  end if;
+
+  v_i   := 1 + floor(random() * (jsonb_array_length(v_src.coords) - 1))::int;
+  v_seg := jsonb_build_array(v_src.coords->(v_i - 1), v_src.coords->v_i);
+  v_id  := 'inc-' || replace(gen_random_uuid()::text, '-', '');
 
   insert into jobs (
     id, report_date, district, county, county_code, category, activity,
     route_type, route_label, route_name, bmp, emp, start_time, end_time, detail,
-    miles, approx, incident, expires_at, coords, centroid, effort, xp_award, pay_award)
+    miles, approx, incident, expires_at, coords, centroid, effort, xp_award, pay_award,
+    min_crews, storm)
   values (
-    v_id, v_day, v_src.district, v_src.county, v_src.county_code, 'Incident', v_kind,
+    v_id, v_day, v_src.district, v_src.county, v_src.county_code,
+    case when v_storm.kind = 'winter' then 'Winter Ops' else 'Incident' end, v_kind,
     v_src.route_type, v_src.route_label, v_src.route_name, v_src.bmp, v_src.emp,
-    to_char(now(), 'FMHH12:MI AM'), to_char(now() + interval '10 minutes', 'FMHH12:MI AM'),
-    v_note, 0, false, true, now() + interval '10 minutes',
-    v_seg, v_src.coords->(v_i - 1), 30, 34, 430);
+    to_char(now(), 'FMHH12:MI AM'),
+    to_char(now() + interval '12 minutes', 'FMHH12:MI AM'),
+    v_note, 0, false, true, now() + interval '12 minutes',
+    v_seg, v_src.coords->(v_i - 1), round(v_effort), v_xp, v_pay,
+    v_minc, v_storm.code is not null);
 
   insert into job_state (job_id) values (v_id);
 
   insert into feed (report_date, kind, body)
-  values (v_day, 'incident',
+  values (v_day,
+          case when v_callout then 'callout' else 'incident' end,
+          case when v_callout then '*** EMERGENCY CALLOUT *** ' else '' end ||
           v_kind || ' reported on ' || coalesce(v_src.route_label, '?') ||
-          ' in ' || v_src.county || ' County - District ' || v_src.district || '.');
+          ' in ' || v_src.county || ' County - District ' || v_src.district ||
+          case when v_storm.code is not null
+               then ' (' || upper(v_storm.kind) || ' conditions - double XP)' else '' end ||
+          case when v_callout then ' - 3 CREWS REQUIRED' else '' end);
 
   return v_id;
-end $$;
+end $BODY$;
 
 -- End-of-day district report card: the trash-talk engine.
 create or replace function build_report_cards(p_date date)
@@ -1073,6 +1319,30 @@ begin
   delete from feed where created_at < now() - interval '2 days';
   delete from game_day where report_date < (select max(report_date) - 1 from game_day);
   delete from route_cache where created_at < now() - interval '3 days';
+  delete from alerts where expires < now() - interval '6 hours';
+end $$;
+
+/*
+ * Mark the day's biggest jobs as milestone routes. Called by the ingest job
+ * after it loads a report: the three longest jobs in each district get 25/50/75%
+ * segment bonuses, so a five-mile paving run on Corridor G reads as a march down
+ * the route rather than one long wall.
+ */
+create or replace function mark_milestone_jobs(p_date date)
+returns integer
+language plpgsql security definer set search_path = public
+as $$
+declare v_n integer;
+begin
+  update jobs set milestone = false where report_date = p_date;
+  with ranked as (
+    select id, row_number() over (partition by district order by effort desc) as rn
+      from jobs where report_date = p_date and not incident
+  )
+  update jobs j set milestone = true
+    from ranked r where r.id = j.id and r.rn <= 3;
+  get diagnostics v_n = row_count;
+  return v_n;
 end $$;
 
 do $$

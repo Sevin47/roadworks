@@ -29,7 +29,9 @@ export async function loadCounties() {
       code: String(f.attributes.CO_CODE).padStart(2, '0'),
       district: Number(f.attributes.Districts),
       fips: f.attributes.FIPS,
-      center: ringCentroid(f.geometry)
+      center: ringCentroid(f.geometry),
+      // Coarse outline, used to tint counties that are under a storm warning.
+      geom: outline(f.geometry)
     }));
     await writeJson(COUNTY_FILE, { fetchedAt: new Date().toISOString(), rows });
   }
@@ -44,6 +46,21 @@ export function countyList() {
 
 export function lookupCounty(name) {
   return counties?.get(normCounty(name)) || null;
+}
+
+/** Largest ring of a county polygon, thinned enough to draw cheaply. */
+function outline(geom, maxPts = 90) {
+  let best = null;
+  for (const ring of geom?.rings || []) {
+    if (!best || ring.length > best.length) best = ring;
+  }
+  if (!best || best.length < 4) return null;
+  let pts = best;
+  if (pts.length > maxPts) {
+    const step = (pts.length - 1) / (maxPts - 1);
+    pts = Array.from({ length: maxPts }, (_, i) => pts[Math.round(i * step)]);
+  }
+  return pts.map((p) => [Math.round(p[0] * 1e4) / 1e4, Math.round(p[1] * 1e4) / 1e4]);
 }
 
 /** Area-weighted centroid of a polygon's outer rings - used as the county HQ. */

@@ -1,0 +1,30 @@
+name: Poll NWS weather alerts
+
+on:
+  schedule:
+    # Every 20 minutes. GitHub's scheduler runs late under load, which is fine —
+    # warnings last hours, and the game only needs to know roughly when a county
+    # is under one.
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: weather
+  cancel-in-progress: true
+
+jobs:
+  weather:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Pull active NWS alerts into Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node ingest/weather.js

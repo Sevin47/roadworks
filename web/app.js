@@ -48,6 +48,7 @@
     catalog: [],
     owned: new Set(),
     reportCards: [],
+    storms: [],
     me: null,
     selected: null,
     skewMs: 0,
@@ -56,7 +57,8 @@
     busy: false
   };
 
-  const layers = { jobs: new Map(), crews: new Map(), routes: new Map(), facilities: null };
+  const layers = { jobs: new Map(), crews: new Map(), routes: new Map(),
+                   facilities: null, storms: null };
   const serverNow = () => Date.now() + state.skewMs;
 
   // -------------------------------------------------------------------- map
@@ -197,6 +199,8 @@
       opt(sb.from('day_report_cards').select('*').order('report_date', { ascending: false }).limit(10))
     ]);
 
+    state.storms = await opt(sb.from('storm_counties').select('*'));
+
     state.counties = counties;
     state.facilities = facs;
     state.ranks = ranks.length ? ranks : [{ idx: 1, name: 'Flagger', xp_required: 0, crews: 3 }];
@@ -209,6 +213,7 @@
 
     for (const j of state.jobs.values()) upsertJobLayer(j);
     drawFacilities();
+    drawStorms();
     buildLegend();
     fillCountySelect();
     fillFilters();
@@ -227,6 +232,7 @@
 
     setInterval(animate, 250);
     setInterval(refreshPlayers, 10000);
+    setInterval(refreshStorms, 120000);
     setInterval(() => state.me && sb.rpc('heartbeat'), 45000);
   }
 
@@ -433,7 +439,7 @@
     const mine = state.me && j.district === state.me.district;
     const style = {
       color: jobColor(j),
-      weight: j.incident ? 7 : busy ? 6 : 4,
+      weight: j.min_crews > 1 ? 9 : j.incident ? 7 : busy ? 6 : 4,
       opacity: st?.done ? 0.3 : (state.me && !mine && !j.incident) ? 0.32 : 0.92,
       dashArray: j.approx ? '5,6' : null
     };
@@ -448,6 +454,9 @@
     line.bindTooltip(
       `<b>${esc(j.activity)}</b><br>${esc(j.route_label)} ${esc(j.route_name || '')}<br>` +
       `${esc(j.county)} Co. · D${j.district}${busy ? ` · ${st.crew_count} crew(s)` : ''}` +
+      `${j.min_crews > 1 ? `<br><b>⛑ CALLOUT — needs ${j.min_crews} crews</b>` : ''}` +
+      `${j.storm ? '<br>⚠ storm conditions — double XP' : ''}` +
+      `${j.milestone ? '<br>🏁 milestone route — segment bonuses' : ''}` +
       `${state.me && !mine && !j.incident ? '<br><i>outside your district</i>' : ''}`,
       { sticky: true }
     );
@@ -473,6 +482,73 @@
         .addTo(g);
     }
     layers.facilities = g.addTo(map);
+  }
+
+  // ------------------------------------------------------------------ storms
+  const STORM_STYLE = {
+    winter: { color: '#a8e6ff', label: '❄ Winter' },
+    flood:  { color: '#4cc9f0', label: '🌊 Flood' },
+    wind:   { color: '#b892ff', label: '💨 Wind' },
+    storm:  { color: '#ff8a3d', label: '⛈ Storm' },
+    other:  { color: '#8b98a8', label: '⚠ Alert' }
+  };
+
+  async function refreshStorms() {
+    const next = await sb.from('storm_counties').select('*')
+      .then((r) => r.data || []).catch(() => []);
+    const before = state.storms.map((s2) => `${s2.code}${s2.level}`).sort().join();
+    state.storms = next;
+    if (before !== next.map((s2) => `${s2.code}${s2.level}`).sort().join()) {
+      drawStorms();
+      renderStormBar();
+    }
+  }
+
+  function stormFor(countyCode) {
+    return state.storms.find((s2) => s2.code === countyCode) || null;
+  }
+
+  function drawStorms() {
+    if (layers.storms) map.removeLayer(layers.storms);
+    if (!state.storms.length) { layers.storms = null; renderStormBar(); return; }
+    const g = L.layerGroup();
+    for (const st of state.storms) {
+      const county = state.counties.find((c) => c.code === st.code);
+      if (!county?.geom) continue;
+      const sty = STORM_STYLE[st.kind] || STORM_STYLE.other;
+      L.polygon(county.geom.map((pt) => [pt[1], pt[0]]), {
+        color: sty.color,
+        weight: st.level >= 2 ? 2 : 1,
+        opacity: st.level >= 2 ? 0.85 : 0.4,
+        fillColor: sty.color,
+        fillOpacity: st.level >= 2 ? 0.13 : 0.05,
+        interactive: false,
+        className: st.level >= 2 ? 'storm-warning' : ''
+      }).addTo(g);
+    }
+    layers.storms = g.addTo(map);
+    if (layers.facilities) layers.facilities.bringToFront();
+    renderStormBar();
+  }
+
+  function renderStormBar() {
+    const bar = $('stormBar');
+    const warn = state.storms.filter((s2) => s2.level >= 2);
+    const watch = state.storms.filter((s2) => s2.level === 1);
+    if (!state.storms.length) { bar.hidden = true; return; }
+    bar.hidden = false;
+    const kinds = [...new Set(state.storms.map((s2) => s2.kind))]
+      .map((k) => (STORM_STYLE[k] || STORM_STYLE.other).label);
+    const mine = state.me
+      ? state.storms.filter((s2) => s2.district === state.me.district).length : 0;
+    bar.innerHTML =
+      `<span class="storm-kinds">${kinds.map(esc).join(' ')}</span>` +
+      `<span>${warn.length} county${warn.length === 1 ? '' : 'ies'} under WARNING` +
+      `${watch.length ? `, ${watch.length} under watch` : ''}</span>` +
+      (mine ? `<span class="storm-mine">${mine} in your district — incidents pay double</span>` : '');
+    bar.title = state.storms
+      .sort((x, y) => y.level - x.level)
+      .map((s2) => `${s2.name} (${s2.level >= 2 ? 'warning' : 'watch'})`).join(', ');
   }
 
   function dropRoute(crewId) {
@@ -727,14 +803,15 @@
       const { progress } = liveProgress(j.id);
       const pct = Math.min(100, (progress / Number(j.effort)) * 100);
       const away = state.me && !dispatchable(j);
-      return `<div class="job ${st?.done ? 'done' : ''} ${mineIds.has(j.id) ? 'mine' : ''} ${j.incident ? 'incident' : ''} ${away ? 'away' : ''}"
+      return `<div class="job ${st?.done ? 'done' : ''} ${mineIds.has(j.id) ? 'mine' : ''} ${j.incident ? 'incident' : ''} ${away ? 'away' : ''} ${j.min_crews > 1 ? 'callout' : ''}"
                    style="border-left-color:${jobColor(j)}" data-job="${esc(j.id)}">
-        <div class="t">${j.incident ? '⚠ ' : ''}${esc(j.activity)}</div>
+        <div class="t">${j.min_crews > 1 ? '⛑ ' : j.incident ? '⚠ ' : ''}${esc(j.activity)}${j.milestone ? ' 🏁' : ''}</div>
         <div class="r">
           <span class="tag">${esc(j.route_label)}</span>
           <span>${esc(j.route_name || j.category)}</span>
           <span>${esc(j.county)} Co. · D${j.district}</span>
-          ${st?.crew_count ? `<span style="color:var(--accent2)">👷 ${st.crew_count}</span>` : ''}
+          ${j.storm ? '<span style="color:var(--accent2)">⚠ storm ×2</span>' : ''}
+          ${st?.crew_count ? `<span style="color:var(--accent2)">👷 ${st.crew_count}${j.min_crews > 1 ? `/${j.min_crews}` : ''}</span>` : ''}
         </div>
         <div class="pbar"><div class="pfill" style="width:${pct}%"></div></div>
       </div>`;
@@ -785,8 +862,16 @@
         ${j.detail ? `<dt>Detail</dt><dd>${esc(j.detail)}</dd>` : ''}
         ${j.approx ? '<dt>Location</dt><dd class="warn">Milepoints fall outside the mapped route extent — full route shown.</dd>' : ''}
         ${j.incident ? `<dt>Clears at</dt><dd class="warn">${new Date(j.expires_at).toLocaleTimeString()}</dd>` : ''}
+        ${j.storm ? `<dt>Conditions</dt><dd class="storm-note">${esc((STORM_STYLE[stormFor(j.county_code)?.kind] || STORM_STYLE.other).label)} — active NWS alert in ${esc(j.county)} County. Double XP.</dd>` : ''}
+        ${j.milestone ? '<dt>Milestone</dt><dd>🏁 One of the day\'s biggest jobs — everyone on site is paid a bonus at 25%, 50% and 75%.</dd>' : ''}
+        ${j.parent_id ? '<dt>Follow-up</dt><dd>Opened by finishing an earlier work order here.</dd>' : ''}
         ${away ? `<dt>Territory</dt><dd class="warn">District ${j.district} is outside your district — only incidents are statewide.</dd>` : ''}
       </dl>
+      ${j.min_crews > 1 && !st?.done ? `
+      <div class="callout-bar ${working >= j.min_crews ? 'ready' : ''}">
+        ⛑ <b>EMERGENCY CALLOUT</b> — ${working} of ${j.min_crews} crews on site.
+        ${working >= j.min_crews ? 'Work is underway.' : 'No work happens until all three arrive.'}
+      </div>` : ''}
       <div class="jobprog">
         <div class="lbl"><span>${st?.done ? 'Closed' : `${Math.round(pct)}% complete`}</span>
           <span>${working} crew(s) working${eta ? ` · ~${fmtDur(eta)} left` : ''}</span></div>

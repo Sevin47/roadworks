@@ -101,7 +101,8 @@ async function main() {
 
   // County reference data, so the client's county picker comes from WVDOT.
   const counties = countyList().map((c) => ({
-    code: c.code, name: c.name, district: c.district, center: c.center
+    code: c.code, name: c.name, district: c.district, center: c.center,
+    fips: c.fips, geom: c.geom
   }));
   await must(db.from('wv_counties').upsert(counties, { onConflict: 'code' }), 'wv_counties');
   await must(db.from('facilities').upsert(facilities, { onConflict: 'id' }), 'facilities');
@@ -150,10 +151,18 @@ async function main() {
     console.log(`\n  removed ${drop.length} work order(s) no longer in the report`);
   }
 
+  // The three biggest jobs per district get 25/50/75% segment bonuses.
+  const { data: marked } = await db.rpc('mark_milestone_jobs', { p_date: bundle.reportDate });
+  console.log(`\n  ${marked ?? 0} milestone job(s) flagged`);
+
+  const winter = jobs.filter((j) => j.category === 'Winter Ops').length;
+  if (winter) console.log(`  ${winter} Winter Ops work order(s) in today's report`);
+
   await db.from('feed').insert({
     report_date: bundle.reportDate,
     kind: 'system',
-    body: `Daily road report ${bundle.reportDate} loaded — ${jobs.length} work orders across 10 districts.`
+    body: `Daily road report ${bundle.reportDate} loaded — ${jobs.length} work orders across 10 districts.` +
+          (winter ? ` ${winter} of them are snow and ice control.` : '')
   });
 
   console.log(`\n\nDone in ${((Date.now() - t0) / 1000).toFixed(1)}s.`);

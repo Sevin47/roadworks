@@ -185,6 +185,30 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .job-actions { display: flex; gap: 8px; margin-top: 16px; }
 .warn { color: var(--accent); font-size: 12px; }
 
+/* ------------------------------------------------------------ storm mode */
+.stormbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 16px;
+  padding: 5px 16px; font-size: 12px;
+  background: linear-gradient(90deg, #1c2b3a, #16202b);
+  border-bottom: 1px solid #2b4a63; color: #bcd9ea;
+}
+.storm-kinds { font-size: 13px; letter-spacing: .04em; }
+.storm-mine { color: var(--accent); font-weight: 600; margin-left: auto; }
+.storm-note { color: #8fd8ff; }
+.storm-warning { animation: stormpulse 3.4s ease-in-out infinite; }
+@keyframes stormpulse { 0%, 100% { opacity: .85; } 50% { opacity: .35; } }
+
+.callout-bar {
+  margin: 12px 0 0; padding: 9px 11px; border-radius: 8px; font-size: 12px;
+  background: #33161f; border: 1px solid var(--bad); color: #ffc9d2;
+}
+.callout-bar.ready { background: #14301f; border-color: var(--good); color: #b6f0cd; }
+.callout-bar b { letter-spacing: .06em; }
+.job.callout { border-left-width: 5px; animation: pulse 1.2s infinite; }
+.ticker .callout { color: var(--bad); font-weight: 700; }
+.ticker .milestone { color: var(--good); }
+.ticker .chain { color: var(--accent2); }
+
 /* ---------------------------------------------------- overtime + garage */
 .overtime { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .ot-head { display: flex; justify-content: space-between; align-items: center;

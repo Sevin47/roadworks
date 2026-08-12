@@ -49,6 +49,10 @@ export const CATEGORY = {
   'Closures':             { base: 70,  perMile: 10, xp: 16, pay: 200, color: '#ff5d5d' },
   'Construction Projects':{ base: 190, perMile: 30, xp: 40, pay: 520, color: '#ff8a3d' },
   'Utilities/Oil & Gas':  { base: 80,  perMile: 14, xp: 14, pay: 170, color: '#7cf29b' },
+  // Snow Removal & Ice Control. WVDOH files these in the daily reports all
+  // winter; the category simply lights up when the season does. Plowing at 5am
+  // pays better than mowing in July.
+  'Winter Ops':           { base: 70,  perMile: 16, xp: 22, pay: 300, color: '#a8e6ff' },
   'Incident':             { base: 60,  perMile: 0,  xp: 34, pay: 430, color: '#ff2e63' }
 };
 export const DEFAULT_CATEGORY = 'Maintenance';

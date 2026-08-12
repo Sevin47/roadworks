@@ -97,6 +97,14 @@ const ROW_RE = new RegExp(
   '(?<detail>.*)$'
 );
 
+/**
+ * Snow Removal & Ice Control is filed under the ordinary Maintenance section,
+ * but it plays completely differently, so it gets promoted to its own category.
+ * The PDF's own section heading is preserved on `section` for fidelity.
+ */
+const WINTER_RE =
+  /\b(snow|ice control|icy|plow|salt|salting|brine|brining|cinder|abrasive|deic|de-ic|sric|drift)/i;
+
 const COUNTY_RE = /^(.+?)\s+County\b/i;
 const DATE_RE = /Reporting\s+Date:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i;
 
@@ -150,10 +158,13 @@ export function parseReport(lines, district) {
     const activity = g.activity.trim();
     if (!activity || activity.length > 120) continue;
 
+    const isWinter = WINTER_RE.test(activity) || WINTER_RE.test(g.detail || '');
+
     rows.push({
       district,
       county,
-      category: section,
+      section,
+      category: isWinter ? 'Winter Ops' : section,
       activity,
       routeType: g.rtype,
       routeTypeLabel: ROUTE_TYPES[g.rtype] || g.rtype,
