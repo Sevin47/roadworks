@@ -49,6 +49,9 @@
     owned: new Set(),
     reportCards: [],
     storms: [],
+    today: null,          // player_day row
+    focus: null,
+    awards: [],
     me: null,
     selected: null,
     skewMs: 0,
@@ -224,6 +227,7 @@
     if (existing) {
       $('boot').hidden = true;
       if (existing.home) map.setView([existing.home[1], existing.home[0]], 9);
+      await standup();
     } else {
       $('joinForm').hidden = false;
       setBoot(`${state.jobs.size} work orders on the board.`);
@@ -258,8 +262,38 @@
         .then((r) => r.data || []).catch(() => [])
     ]);
     state.owned = new Set(eq.map((e) => e.item_key));
-    if (data) { state.me = data; renderMe(); }
+    if (data) {
+      state.me = data;
+      state.today = await sb.from('player_day').select('*')
+        .eq('player_id', user.id).eq('report_date', state.reportDate).maybeSingle()
+        .then((r) => r.data).catch(() => null);
+      state.awards = await sb.from('commendations').select('*')
+        .eq('player_id', user.id).order('earned_at', { ascending: false }).limit(30)
+        .then((r) => r.data || []).catch(() => []);
+      renderMe();
+    }
     return data;
+  }
+
+  /** Morning standup: books the streak and the stipend, once per report day. */
+  async function standup() {
+    const { data, error } = await sb.rpc('daily_checkin');
+    if (error || !data) return;
+    state.focus = data.focus;
+    renderFocus();
+    if (data.new) {
+      toast(`Reported for duty — day ${data.streak} of your run. +$${data.stipend} stipend.`, 'good');
+    }
+    await loadMe();
+    renderAll();
+  }
+
+  function renderFocus() {
+    const el = $('focusChip');
+    if (!state.focus) { el.hidden = true; return; }
+    el.hidden = false;
+    el.innerHTML = `<b>Focus this week</b> ${esc(state.focus)} <span>+50% XP</span>`;
+    el.style.borderColor = CATEGORY[state.focus] || 'var(--line)';
   }
 
   // --------------------------------------------------------------- realtime
@@ -344,6 +378,7 @@
     localStorage.setItem('wvdot.county', state.me.county);
     $('boot').hidden = true;
     if (state.me.home) map.setView([state.me.home[1], state.me.home[0]], 9);
+    await standup();
     renderAll();
   });
 
@@ -416,6 +451,10 @@
       }
     }
     renderAll();
+  }
+
+  async function radioPing(jobId) {
+    await call('radio_ping', { p_job: jobId }, 'Backup requested on the radio.');
   }
 
   async function overtime(fn, jobId, label) {
@@ -713,6 +752,15 @@
     $('meFunds').textContent = `$${(me.funds || 0).toLocaleString()}`;
     $('meDone').textContent = me.jobs_done;
     $('meDayXp').textContent = me.day_xp;
+    $('meStreak').textContent = me.streak ? `🔥 ${me.streak}` : '—';
+    $('meStars').textContent = `★ ${me.stars || 0}`;
+    const home = state.today?.jobs_home || 0;
+    const q = $('quota');
+    q.classList.toggle('done', home >= 5);
+    q.innerHTML = home >= 5
+      ? `<b>★ County quota met</b> — 5 closed in ${esc(me.county)}`
+      : `County quota <b>${home}/5</b> in ${esc(me.county)}` +
+        `<span class="qbar"><span style="width:${(home / 5) * 100}%"></span></span>`;
     $('crewCount').textContent = `${myCrews().length}/${maxCrews()}`;
     $('garageBtn').hidden = myRankIdx() < 4;
   }
@@ -735,7 +783,7 @@
       const boosted = c.boost_until && Date.parse(c.boost_until) > now;
       const fac = state.facilities.find((f) => f.id === c.facility_id);
       const status = eta > 0
-        ? `en route ${eta}s${fac ? ` from ${esc(fac.name)}` : ''}`
+        ? `${c.convoy ? '🚗💨 convoy · ' : ''}en route ${eta}s${fac ? ` from ${esc(fac.name)}` : ''}`
         : `${boosted ? '⚡ double shift · ' : ''}working ${pct}%`;
       return `<div class="crew ${eta > 0 ? 'travel' : 'working'} ${c.contractor_until ? 'contractor' : ''}">
         <span class="dot"></span>
@@ -865,6 +913,7 @@
         ${j.storm ? `<dt>Conditions</dt><dd class="storm-note">${esc((STORM_STYLE[stormFor(j.county_code)?.kind] || STORM_STYLE.other).label)} — active NWS alert in ${esc(j.county)} County. Double XP.</dd>` : ''}
         ${j.milestone ? '<dt>Milestone</dt><dd>🏁 One of the day\'s biggest jobs — everyone on site is paid a bonus at 25%, 50% and 75%.</dd>' : ''}
         ${j.parent_id ? '<dt>Follow-up</dt><dd>Opened by finishing an earlier work order here.</dd>' : ''}
+        ${state.focus && j.category === state.focus ? '<dt>Focus</dt><dd class="focus-note">★ Focus category this week — +50% XP.</dd>' : ''}
         ${away ? `<dt>Territory</dt><dd class="warn">District ${j.district} is outside your district — only incidents are statewide.</dd>` : ''}
       </dl>
       ${j.min_crews > 1 && !st?.done ? `
@@ -886,6 +935,7 @@
             : `<button class="primary" data-dispatch="${esc(j.id)}" ${away || full ? 'disabled' : ''}>${
                 away ? 'Outside your district' : full ? 'All crews busy' : 'Dispatch a crew'}</button>`}
         <button class="ghost" data-close>Close</button>
+        ${st?.done ? '' : `<button class="ghost" data-radio="${esc(j.id)}" title="Ask the other managers for help">📻 Request backup</button>`}
       </div>
       ${ot && !st?.done && !away ? `
       <div class="overtime">
@@ -940,12 +990,22 @@
     const div = document.createElement('div');
     div.className = e.kind;
     const time = new Date(e.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-    div.textContent = `${time}  ${e.body}`;
+    if (e.job_id && state.jobs.has(e.job_id)) {
+      div.innerHTML = `${time}  ${esc(e.body)} <a href="#" data-job="${esc(e.job_id)}">dispatch →</a>`;
+    } else {
+      div.textContent = `${time}  ${e.body}`;
+    }
     const t = $('ticker');
     t.prepend(div);
     while (t.childElementCount > 60) t.lastElementChild.remove();
     if (e.kind === 'incident') toast(e.body, 'warn');
+    if (e.kind === 'callout') toast(e.body, 'warn');
     if (e.kind === 'report-card') toast(e.body, 'good');
+    if (e.kind === 'radio') toast(e.body, 'warn');
+    if (e.kind === 'commendation' && state.me && e.body.startsWith(state.me.name + ' ')) {
+      toast(e.body, 'good');
+      loadMe();
+    }
     if (e.kind === 'system' && e.body.includes('reset')) setTimeout(() => location.reload(), 3000);
   }
 
@@ -999,6 +1059,8 @@
     if (disp) { disp.disabled = true; return dispatch(disp.dataset.dispatch); }
     const rec = e.target.closest('[data-recall]');
     if (rec) return recall(rec.dataset.recall);
+    const rad = e.target.closest('[data-radio]');
+    if (rad) { rad.disabled = true; return radioPing(rad.dataset.radio); }
     if (e.target.closest('[data-close]') || e.target.id === 'jobModal') return closeJob();
     const jobEl = e.target.closest('[data-job]');
     if (jobEl && !e.target.closest('[data-ot]')) return openJob(jobEl.dataset.job);

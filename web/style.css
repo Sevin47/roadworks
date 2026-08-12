@@ -185,6 +185,40 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .job-actions { display: flex; gap: 8px; margin-top: 16px; }
 .warn { color: var(--accent); font-size: 12px; }
 
+/* ------------------------------------------------------- dailies + awards */
+.streakrow {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 8px; font-size: 12px; color: var(--dim);
+}
+.streakrow span:first-child { color: #ff9d4d; font-weight: 600; }
+.streakrow span:last-child { color: var(--accent); font-weight: 600; }
+.quota {
+  margin-top: 8px; font-size: 11px; color: var(--dim);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.quota b { color: var(--txt); }
+.quota.done { color: var(--good); }
+.quota.done b { color: var(--good); }
+.qbar {
+  flex: 1; min-width: 50px; height: 4px; background: #0a0f15;
+  border-radius: 99px; overflow: hidden; display: block;
+}
+.qbar span { display: block; height: 100%; background: var(--accent); }
+
+.focuschip {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 4px 16px; font-size: 12px; color: var(--dim);
+  background: #131b24; border-bottom: 1px solid var(--line); border-left: 3px solid var(--line);
+}
+.focuschip b { color: var(--accent); font-weight: 600; }
+.focuschip span { color: var(--good); }
+.focus-note { color: var(--accent); }
+
+.ticker .commendation { color: var(--accent); font-weight: 600; }
+.ticker .radio { color: #ff9d4d; font-weight: 600; }
+.ticker a { color: var(--accent2); text-decoration: none; border-bottom: 1px dotted; }
+.ticker a:hover { color: var(--accent); }
+
 /* ------------------------------------------------------------ storm mode */
 .stormbar {
   flex: 0 0 auto; display: flex; align-items: center; gap: 16px;

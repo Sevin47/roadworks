@@ -150,7 +150,11 @@ create table if not exists players (
   last_seen   timestamptz not null default now()
 );
 
-alter table players add column if not exists prestige integer not null default 0;
+alter table players add column if not exists prestige   integer not null default 0;
+alter table players add column if not exists streak     integer not null default 0;
+alter table players add column if not exists best_streak integer not null default 0;
+alter table players add column if not exists stars      integer not null default 0;
+alter table players add column if not exists last_login date;
 
 create index if not exists players_day_idx on players (day_date, day_xp desc);
 
@@ -176,6 +180,7 @@ alter table crews add column if not exists facility_id      text;
 alter table crews add column if not exists route            jsonb;
 alter table crews add column if not exists boost_until      timestamptz;
 alter table crews add column if not exists contractor_until timestamptz;
+alter table crews add column if not exists convoy           boolean not null default false;
 
 -- A player may hold one real crew per job, plus any hired contractors, so the
 -- old blanket unique constraint is replaced by a partial one.
@@ -213,6 +218,8 @@ create table if not exists feed (
   body        text        not null,
   created_at  timestamptz not null default now()
 );
+
+alter table feed add column if not exists job_id text;
 
 create index if not exists feed_recent_idx on feed (created_at desc);
 
@@ -306,6 +313,37 @@ create table if not exists job_milestones (
   primary key (job_id, pct)
 );
 
+-- ------------------------------------------------------- dailies + awards
+
+-- Per-manager tally for the current report day. Everything the daily
+-- commendations key off lives here, so awarding them is a cheap lookup rather
+-- than a scan over the day's completions.
+create table if not exists player_day (
+  player_id         uuid not null references players(id) on delete cascade,
+  report_date       date not null,
+  jobs_closed       integer not null default 0,
+  jobs_home         integer not null default 0,
+  incidents_cleared integer not null default 0,
+  winter_closes     integer not null default 0,
+  convoys           integer not null default 0,
+  checked_in        boolean not null default false,
+  primary key (player_id, report_date)
+);
+
+-- Commendations are the trophy currency: earned, never spent.
+create table if not exists commendations (
+  id          bigserial primary key,
+  player_id   uuid not null references players(id) on delete cascade,
+  code        text not null,
+  title       text not null,
+  detail      text,
+  report_date date not null,
+  earned_at   timestamptz not null default now(),
+  unique (player_id, code, report_date)
+);
+
+create index if not exists commendations_player_idx on commendations (player_id, earned_at desc);
+
 -- --------------------------------------------------------------- equipment
 
 create table if not exists equipment_catalog (
@@ -357,7 +395,7 @@ begin
     'game_day','wv_counties','facilities','ranks','jobs','job_state','players',
     'crews','contributions','route_cache','feed','day_scores',
     'district_day_stats','day_report_cards','equipment_catalog','player_equipment',
-    'alerts','job_chains','job_milestones']
+    'alerts','job_chains','job_milestones','player_day','commendations']
   loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists %I on %I', t || '_read', t);
@@ -420,6 +458,199 @@ returns numeric language sql stable as $$
        * (1 + player_equip_bonus(p_player, 'rate_cat', p_category))
        * (1 + 0.02 * coalesce((select prestige from players where id = p_player), 0));
 $$;
+
+-- ------------------------------------------------------- weekly focus
+
+-- The rotating focus category, derived from the ISO week rather than stored,
+-- so there is no scheduler to drift and no config row to go stale.
+create or replace function current_focus()
+returns text language sql stable as $$
+  select (array['Bridge','Closures','Construction Projects','Utilities/Oil & Gas',
+                'Heavy Maintenance','Winter Ops','Maintenance'])
+         [1 + (extract(week from now())::int % 7)];
+$$;
+
+-- ------------------------------------------------------------ commendations
+
+create or replace function award(
+  p_player uuid, p_code text, p_title text, p_detail text,
+  p_date date, p_once boolean default false)
+returns boolean
+language plpgsql security definer set search_path = public
+as $$
+declare v_new boolean := false; v_name text;
+begin
+  if p_once and exists (select 1 from commendations where player_id = p_player and code = p_code) then
+    return false;
+  end if;
+
+  insert into commendations (player_id, code, title, detail, report_date)
+  values (p_player, p_code, p_title, p_detail, p_date)
+  on conflict (player_id, code, report_date) do nothing;
+  get diagnostics v_new = row_count;
+
+  if v_new then
+    update players set stars = stars + 1 where id = p_player returning name into v_name;
+    insert into feed (report_date, kind, body)
+    values (p_date, 'commendation', v_name || ' earned a commendation: ' || p_title || ' *');
+  end if;
+  return v_new;
+end $$;
+
+/*
+ * Re-check the daily commendations for one manager. Called after every close,
+ * and cheap enough to be: all of it reads a single player_day row.
+ */
+create or replace function check_commendations(p_player uuid, p_date date)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_d player_day%rowtype; v_p players%rowtype;
+begin
+  select * into v_d from player_day where player_id = p_player and report_date = p_date;
+  if not found then return; end if;
+  select * into v_p from players where id = p_player;
+
+  if v_d.jobs_home >= 5 then
+    perform award(p_player, 'county-quota', 'County Quota',
+                  'Five work orders closed in your home county.', p_date);
+  end if;
+
+  if v_d.incidents_cleared >= 3 then
+    perform award(p_player, 'incident-sla', 'Rapid Response',
+                  'Three incidents cleared before they timed out.', p_date);
+  end if;
+
+  if v_d.winter_closes >= 10 then
+    perform award(p_player, 'snowbird', 'Snowbird',
+                  'Ten winter jobs cleared while the state was under a winter warning.',
+                  p_date, true);
+  end if;
+
+  if v_d.convoys >= 3 then
+    perform award(p_player, 'convoy', 'Rolling Convoy',
+                  'Three convoy dispatches in one day.', p_date);
+  end if;
+
+  -- First close on the board today, whoever gets there.
+  if v_d.jobs_closed >= 1
+     and not exists (select 1 from commendations where code = 'first-light' and report_date = p_date) then
+    perform award(p_player, 'first-light', 'First Light',
+                  'First work order closed on the board today.', p_date);
+  end if;
+
+  if v_p.streak >= 5 then
+    perform award(p_player, 'streak-5', 'Week of Service',
+                  'Reported for duty five report days running.', p_date, true);
+  end if;
+  if v_p.streak >= 10 then
+    perform award(p_player, 'streak-10', 'Two Weeks Running',
+                  'Ten consecutive report days on shift.', p_date, true);
+  end if;
+  if v_p.streak >= 20 then
+    perform award(p_player, 'streak-20', 'Twenty and Counting',
+                  'Twenty consecutive report days on shift.', p_date, true);
+  end if;
+end $$;
+
+/*
+ * Morning standup. Idempotent per report day: the first call books the streak
+ * and the stipend, later calls just report what today already looks like.
+ *
+ * The streak counts report days, not calendar days, because WVDOH does not file
+ * on weekends -- a Monday login after a Friday close is unbroken service.
+ */
+create or replace function daily_checkin()
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_uid  uuid := auth.uid();
+  v_p    players%rowtype;
+  v_day  date;
+  v_gap  integer;
+  v_pay  integer := 0;
+  v_new  boolean := false;
+begin
+  if v_uid is null then raise exception 'not signed in'; end if;
+  select max(report_date) into v_day from game_day;
+  if v_day is null then raise exception 'no report loaded yet'; end if;
+
+  select * into v_p from players where id = v_uid for update;
+  if not found then raise exception 'no manager profile yet'; end if;
+
+  if v_p.last_login is distinct from v_day then
+    v_gap := case when v_p.last_login is null then 999 else v_day - v_p.last_login end;
+    -- Up to three calendar days of gap still counts as consecutive: that covers
+    -- a normal weekend plus a holiday with no report filed.
+    if v_gap between 1 and 3 then
+      v_p.streak := v_p.streak + 1;
+    else
+      v_p.streak := 1;
+    end if;
+    v_pay := 100 + 25 * least(v_p.streak - 1, 8);
+    v_new := true;
+
+    update players
+       set streak = v_p.streak,
+           best_streak = greatest(best_streak, v_p.streak),
+           last_login = v_day,
+           funds = funds + v_pay,
+           last_seen = now()
+     where id = v_uid;
+
+    insert into player_day (player_id, report_date, checked_in)
+    values (v_uid, v_day, true)
+    on conflict (player_id, report_date) do update set checked_in = true;
+
+    perform check_commendations(v_uid, v_day);
+  end if;
+
+  return jsonb_build_object(
+    'new', v_new,
+    'report_date', v_day,
+    'streak', (select streak from players where id = v_uid),
+    'stipend', v_pay,
+    'focus', current_focus(),
+    'stars', (select stars from players where id = v_uid),
+    'quota', coalesce((select jobs_home from player_day
+                        where player_id = v_uid and report_date = v_day), 0));
+end $$;
+
+/*
+ * Radio ping: one tap turns "somebody help me on Corridor G" from a chat
+ * message into a link everyone can dispatch from.
+ */
+create or replace function radio_ping(p_job text)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_p   players%rowtype;
+  v_job jobs%rowtype;
+  v_st  job_state%rowtype;
+begin
+  if v_uid is null then raise exception 'not signed in'; end if;
+  select * into v_p from players where id = v_uid;
+  select * into v_job from jobs where id = p_job;
+  if not found then raise exception 'that work order is gone'; end if;
+  select * into v_st from job_state where job_id = p_job;
+  if v_st.done then raise exception 'that work order is already closed'; end if;
+
+  -- One ping per job per minute, so the ticker stays readable.
+  if exists (select 1 from feed
+              where kind = 'radio' and job_id = p_job
+                and created_at > now() - interval '60 seconds') then
+    raise exception 'that job was just called out on the radio';
+  end if;
+
+  insert into feed (report_date, kind, body, job_id)
+  values (v_job.report_date, 'radio',
+          v_p.name || ' is requesting backup on ' || v_job.activity || ' - ' ||
+          coalesce(v_job.route_label, '?') || ' (' || v_job.county || ' Co., D' ||
+          v_job.district || ')', p_job);
+end $$;
 
 -- ------------------------------------------------------------------ weather
 
@@ -607,6 +838,8 @@ begin
                 -- Patrol your own turf: home county work pays better.
                 * (case when v_c.county_code is not null
                           and v_c.county_code = v_job.county_code then 1.25 else 1 end)
+                -- This week's focus category.
+                * (case when v_job.category = current_focus() then 1.5 else 1 end)
                 * (1 + player_equip_bonus(v_c.player_id, 'xp_cat', v_job.category))
               )::int);
       v_pay := round(v_job.pay_award * v_frac
@@ -620,6 +853,20 @@ begin
              jobs_done = jobs_done + 1,
              level     = rank_for(xp + v_xp)
        where id = v_c.player_id;
+
+      insert into player_day (player_id, report_date, jobs_closed, jobs_home,
+                              incidents_cleared, winter_closes)
+      values (v_c.player_id, v_job.report_date, 1,
+              case when v_c.county_code = v_job.county_code then 1 else 0 end,
+              case when v_job.incident then 1 else 0 end,
+              case when v_job.category = 'Winter Ops' and v_job.storm then 1 else 0 end)
+      on conflict (player_id, report_date) do update set
+        jobs_closed       = player_day.jobs_closed + 1,
+        jobs_home         = player_day.jobs_home + excluded.jobs_home,
+        incidents_cleared = player_day.incidents_cleared + excluded.incidents_cleared,
+        winter_closes     = player_day.winter_closes + excluded.winter_closes;
+
+      perform check_commendations(v_c.player_id, v_job.report_date);
     end loop;
 
     select string_agg(distinct player_name, ', ') into v_names from crews where job_id = p_job;
@@ -767,6 +1014,7 @@ declare
   v_travel numeric;
   v_route  jsonb := null;
   v_ok     boolean := false;
+  v_convoy integer := 0;
 begin
   if v_uid is null then raise exception 'not signed in'; end if;
   select * into v_p from players where id = v_uid;
@@ -826,14 +1074,40 @@ begin
   end if;
 
   v_travel := v_travel * (1 - player_equip_bonus(v_uid, 'travel', v_job.category));
-  v_travel := least(75, greatest(8, v_travel));
 
-  insert into crews (job_id, player_id, player_name, arrives_at, rate, facility_id, route)
+  -- Rolling convoy: if anyone else set out for this job in the last minute,
+  -- everyone still on the road runs 40% of their remaining trip faster. This is
+  -- what makes "everyone hit Corridor G" in chat worth saying out loud.
+  select count(*) into v_convoy from crews
+   where job_id = p_job and dispatched_at > now() - interval '60 seconds'
+     and arrives_at > now() and player_id <> v_uid;
+
+  if v_convoy > 0 then
+    v_travel := v_travel * 0.6;
+    update crews
+       set arrives_at = now() + make_interval(secs => extract(epoch from (arrives_at - now())) * 0.6),
+           convoy = true
+     where job_id = p_job and arrives_at > now()
+       and dispatched_at > now() - interval '60 seconds';
+    insert into player_day (player_id, report_date, convoys)
+    select c.player_id, v_job.report_date, 1 from crews c
+     where c.job_id = p_job and c.convoy and c.arrives_at > now()
+    on conflict (player_id, report_date)
+      do update set convoys = player_day.convoys + 1;
+  end if;
+
+  v_travel := least(75, greatest(6, v_travel));
+
+  insert into crews (job_id, player_id, player_name, arrives_at, rate, facility_id, route, convoy)
   values (p_job, v_uid, v_p.name, now() + make_interval(secs => v_travel),
-          player_crew_rate(v_uid, v_job.category), v_fac.id, v_route);
+          player_crew_rate(v_uid, v_job.category), v_fac.id, v_route, v_convoy > 0);
 
   update job_state set crew_count = crew_count + 1 where job_id = p_job returning * into v_st;
   update players set last_seen = now() where id = v_uid;
+
+  if v_convoy > 0 then
+    perform check_commendations(v_uid, v_job.report_date);
+  end if;
   return v_st;
 end $$;
 
@@ -1312,6 +1586,9 @@ begin
   end if;
 
   update players set day_xp = 0, day_date = p_new_date;
+  -- A manager who skipped more than three calendar days has broken their run.
+  update players set streak = 0
+   where last_login is null or p_new_date - last_login > 3;
   delete from crews;
   insert into feed (report_date, kind, body)
   values (p_new_date, 'system', 'A new daily road report posted - the board has reset.');
@@ -1386,7 +1663,9 @@ begin
     'roll_day(date)',
     'build_report_cards(date)',
     'mark_milestone_jobs(date)',
-    'prune_history()']
+    'prune_history()',
+    'award(uuid,text,text,text,date,boolean)',
+    'check_commendations(uuid,date)']
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f);
   end loop;
