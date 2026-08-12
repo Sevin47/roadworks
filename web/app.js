@@ -173,6 +173,20 @@
   async function boot() {
     setBoot('Signing in…');
     let { data: { session } } = await sb.auth.getSession();
+
+    // A stored session can outlive the account it points at — an anonymous user
+    // removed server-side leaves the browser holding a token for somebody who
+    // no longer exists, and every write then fails on the foreign key from
+    // players to auth.users. Validate against the auth server before trusting
+    // the cached session, and start over cleanly if it is stale.
+    if (session) {
+      const { error: userErr } = await sb.auth.getUser();
+      if (userErr) {
+        await sb.auth.signOut().catch(() => {});
+        session = null;
+      }
+    }
+
     if (!session) {
       const { error } = await sb.auth.signInAnonymously();
       if (error) {
@@ -369,7 +383,17 @@
 
   // ------------------------------------------------------------------ actions
   async function call(fn, args, okMsg) {
-    const { data, error } = await sb.rpc(fn, args);
+    let { data, error } = await sb.rpc(fn, args);
+
+    // Belt and braces for the same stale-identity case boot() guards against:
+    // if the signed-in user has been removed, re-establish an identity once and
+    // retry rather than showing a raw foreign-key error.
+    if (error && /players_id_fkey|foreign key|violates/i.test(error.message)) {
+      await sb.auth.signOut().catch(() => {});
+      const { error: authErr } = await sb.auth.signInAnonymously();
+      if (!authErr) ({ data, error } = await sb.rpc(fn, args));
+    }
+
     if (error) { toast(error.message.replace(/^.*?:\s*/, ''), 'warn'); return null; }
     if (okMsg) toast(okMsg, 'good');
     return data;
