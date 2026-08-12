@@ -579,6 +579,13 @@ returns numeric language sql immutable as $$
   select 69.0 * sqrt((p_lat2 - p_lat1) ^ 2 + ((p_lng2 - p_lng1) * 0.78) ^ 2);
 $$;
 
+-- `create or replace function` overloads rather than replaces when the argument
+-- list changes, and PostgREST then refuses to choose between the two. Retire
+-- the signatures these replaced.
+drop function if exists dispatch_crew(text);
+drop function if exists max_crews_for(integer);
+drop function if exists level_for(integer);
+
 /*
  * dispatch_crew
  *
