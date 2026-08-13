@@ -206,6 +206,17 @@ async function main() {
   const { data: marked } = await db.rpc('mark_milestone_jobs', { p_date: reportDate });
   console.log(`\n  ${marked ?? 0} milestone job(s) flagged`);
 
+  // Older boards have already been archived by roll_day, and leaving them
+  // resident means yesterday's work orders keep answering queries. Deleting the
+  // day cascades its jobs, state, crews and contributions; day_scores and the
+  // report cards are separate tables and survive.
+  const { data: old } = await db.from('game_day')
+    .select('report_date').lt('report_date', reportDate);
+  if (old?.length) {
+    await must(db.from('game_day').delete().lt('report_date', reportDate), 'prune old boards');
+    console.log(`  cleared ${old.length} superseded board(s): ${old.map((o) => o.report_date).join(', ')}`);
+  }
+
   const winterCount = jobs.filter((j) => j.category === 'Winter Ops').length;
   await db.from('feed').insert({
     report_date: reportDate,
