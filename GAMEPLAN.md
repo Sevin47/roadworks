@@ -1,7 +1,7 @@
-# WVDOT Roadworks — Core Game Plan
+# Roadworks — Core Game Plan
 
 The design bet: **the real data is the game.** Every mechanic below either makes the
-daily WV511 report more interesting to act on, or gives players a reason to come back
+daily the daily report report more interesting to act on, or gives players a reason to come back
 for tomorrow's. Anything that could exist in a generic clicker gets cut.
 
 Hard constraints every mechanic must respect:
@@ -26,7 +26,7 @@ Hard constraints every mechanic must respect:
 
 - **Your county is who you are.** Chosen at signup; it's your name tag, your HQ, and
   your travel origin.
-- **Your district is where you work.** Jobs are dispatchable anywhere in your WVDOH
+- **Your district is where you work.** Jobs are dispatchable anywhere in your the highway department
   district. Jobs outside it don't offer a dispatch button (grayed, "outside D4").
 - **Home-county bonus:** +25% XP on jobs in your own county, so you patrol your own
   turf first and fan out second.
@@ -50,7 +50,7 @@ Crews stop teleporting from an abstract county centroid. Both halves ride on rea
 data, verified working:
 
 ### Real dispatch origins
-`Transportation/MapServer/4` (WV_DOT_Facilities) carries **218 real WVDOT
+`Transportation/MapServer/4` (WV_DOT_Facilities) carries **218 real the highway department
 facilities**: 10 district HQs, ~63 county headquarters, ~57 substations, plus the
 interstate/corridor section garages ("I-79 Section 1", "Corridor G Section 2").
 The ingest job loads them into a `facilities` table (name, kind, district, county,
@@ -108,7 +108,7 @@ guesses.
 
 ## 4. Progression: Career Ranks
 
-WVDOT-flavored ranks on a curve a casual break-room player can *finish* in a season
+the highway department-flavored ranks on a curve a casual break-room player can *finish* in a season
 (~2–3 months), with the UI revealing systems as they're earned:
 
 | Rank | XP | Unlocks |
@@ -120,14 +120,14 @@ WVDOT-flavored ranks on a curve a casual break-room player can *finish* in a sea
 | Maintenance Superintendent | 800 | Specialist certification slot 1 |
 | County Administrator | 1,400 | 6th crew |
 | District Engineer | 2,200 | Specialist slot 2 |
-| State Highway Engineer | 3,200 | 7th crew |
-| Deputy Commissioner | 4,400 | +10% budget payouts |
-| **Commissioner of Highways** | 5,800 | 8th crew, gold name in feed, prestige |
+| Regional Engineer | 3,200 | 7th crew |
+| Deputy Director | 4,400 | +10% budget payouts |
+| **Highway Director** | 5,800 | 8th crew, gold name in feed, prestige |
 
-- **Prestige ("Transfer")**: at Commissioner, optionally transfer to a new county
+- **Prestige ("Transfer")**: at Highway Director, optionally transfer to a new county
   (new district = genuinely new board). XP resets, you keep equipment and
   commendations, gain a permanent +2% work rate (stacking, cap +10%), and a service
-  stripe: "Commissioner (2nd term)".
+  stripe: "Director (2nd term)".
 
 ### Specialist certifications
 
@@ -188,7 +188,7 @@ and prestige bonuses all drop into the same integral.
 Two layers, both riding on real data:
 
 ### 6a. The reports already know it's winter
-WVDOH files **Snow Removal & Ice Control (SRIC)** rows in the daily reports all
+the highway department files **Snow Removal & Ice Control (SRIC)** rows in the daily reports all
 winter — plowing, salting, brining, cindering. The parser already passes them
 through untouched. We detect them (`snow|ice|plow|salt|brine|cinder|SRIC` against
 activity + detail) and promote them to a **Winter Ops** category: own color
@@ -251,7 +251,7 @@ Ranked by bang-for-buck:
 4. **Milestone jobs** — the day's 3 longest jobs get 25/50/75% markers paying small
    instant bonuses to everyone on site. Long jobs become a march down real geometry.
 5. **Radio pings** — "📻 request backup" posts a one-tap dispatch link to the feed.
-6. **Ghost traffic (later)** — AADT layer (already in WVDOT's REST services) sizes a
+6. **Ghost traffic (later)** — AADT layer (already in the state's REST services) sizes a
    traffic glow; high-AADT jobs pay a hazard bonus. Texture, near-zero burden.
 
 ## 9. What we deliberately do NOT build

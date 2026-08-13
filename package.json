@@ -1,18 +1,16 @@
 {
-  "name": "wvdot-roadworks",
-  "version": "1.0.0",
+  "name": "roadworks",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "WVDOT Roadworks - a live multiplayer county-manager game built on real WV511 daily road reports and WVDOT GIS",
-  "main": "server/index.js",
+  "description": "Roadworks - a shared, real-time road dispatch game on a generated daily work board",
   "scripts": {
-    "start": "node --env-file-if-exists=.env server/index.js",
-    "refresh": "node server/tools/refresh.js",
-    "check": "node server/tools/selftest.js"
+    "board": "node ingest/generate.js",
+    "board:dry": "node ingest/generate.js --dry-run",
+    "weather": "node ingest/weather.js",
+    "weather:dry": "node ingest/weather.js --dry-run"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.112.3",
-    "pdfjs-dist": "^6.2.108",
-    "ws": "^8.21.3"
+    "@supabase/supabase-js": "^2.112.3"
   }
 }

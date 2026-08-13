@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WVDOT Roadworks — District Dispatch</title>
+<title>Roadworks — District Dispatch</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🚧</text></svg>" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="./style.css" />
@@ -12,8 +12,8 @@
 
 <div id="boot" class="overlay">
   <div class="boot-card">
-    <div class="logo"><span class="cone">🚧</span> WVDOT <b>ROADWORKS</b></div>
-    <p class="tagline">Live district dispatch, built on today's real WV511 daily road reports.</p>
+    <div class="logo"><span class="cone">🚧</span> <b>ROADWORKS</b></div>
+    <p class="tagline">Dispatch crews across a live board of road work.</p>
     <div id="bootStatus" class="boot-status">Connecting…</div>
     <form id="joinForm" class="join" hidden>
       <label>Manager name
@@ -25,15 +25,15 @@
       <button type="submit" class="primary">Report for duty</button>
     </form>
     <p class="fineprint">
-      Work orders are parsed straight from the ten WVDOH district PDFs on wv511.org and located on the
-      WVDOT Roads &amp; Highways county-milepoint route network. Everyone shares one board — the more
-      crews on a job, the faster it closes.
+      A fresh work board is generated every day and placed on real, measured road
+      centrelines from public state GIS. Everyone shares one board — the more crews
+      on a job, the faster it closes.
     </p>
   </div>
 </div>
 
 <header class="topbar">
-  <div class="brand"><span class="cone">🚧</span> WVDOT <b>ROADWORKS</b></div>
+  <div class="brand"><span class="cone">🚧</span> <b>ROADWORKS</b></div>
   <div class="daybox">
     <div class="daylabel">Daily Road Report</div>
     <div class="daydate" id="dayDate">—</div>

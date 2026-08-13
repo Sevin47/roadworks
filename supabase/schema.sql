@@ -1,5 +1,5 @@
 -- ============================================================================
--- WVDOT Roadworks — Supabase schema
+-- Roadworks — Supabase schema
 --
 -- The whole backend. There is no game server: the browser talks to Postgres,
 -- every mutation goes through a security-definer RPC, and progress is derived
@@ -13,7 +13,7 @@ create extension if not exists pg_cron;
 
 -- ----------------------------------------------------------------- the board
 
--- One row per WV511 daily road report that has been ingested.
+-- One row per daily road report that has been ingested.
 create table if not exists game_day (
   report_date   date primary key,
   loaded_at     timestamptz not null default now(),
@@ -76,8 +76,8 @@ create index if not exists job_state_active_idx on job_state (done, crew_count);
 
 -- ------------------------------------------------------------------ players
 
--- County reference data, loaded by the ingest job from WVDOT's own county
--- layer, so the county list a player picks from is WVDOT's, not a hardcoded one.
+-- County reference data, loaded by the ingest job from the state's own county
+-- layer, so the county list a player picks from is the state's, not a hardcoded one.
 create table if not exists wv_counties (
   code     text primary key,
   name     text not null unique,
@@ -89,7 +89,7 @@ create table if not exists wv_counties (
 alter table wv_counties add column if not exists fips integer;
 alter table wv_counties add column if not exists geom jsonb;
 
--- Real WVDOT facilities (Transportation/MapServer/4). Crews roll from the
+-- Real highway facilities (Transportation/MapServer/4). Crews roll from the
 -- nearest dispatchable one in the player's district — a Boone job draws a crew
 -- out of Seth Substation, an I-79 job out of the I-79 section garage.
 -- Stockpiles are kept (winter ops will want them) but are not dispatch points.
@@ -125,9 +125,9 @@ insert into ranks (idx, name, xp_required, crews, unlock) values
   ( 5, 'Maintenance Superintendent',  800, 5, 'Certification slot'),
   ( 6, 'County Administrator',       1400, 6, '6th crew'),
   ( 7, 'District Engineer',          2200, 6, 'Second certification slot'),
-  ( 8, 'State Highway Engineer',     3200, 7, '7th crew'),
-  ( 9, 'Deputy Commissioner',        4400, 7, '+10% budget payouts'),
-  (10, 'Commissioner of Highways',   5800, 8, '8th crew, prestige transfer')
+  ( 8, 'Regional Engineer',          3200, 7, '7th crew'),
+  ( 9, 'Deputy Director',            4400, 7, '+10% budget payouts'),
+  (10, 'Highway Director',           5800, 8, '8th crew, prestige transfer')
 on conflict (idx) do update
   set name = excluded.name, xp_required = excluded.xp_required,
       crews = excluded.crews, unlock = excluded.unlock;
@@ -270,7 +270,7 @@ create table if not exists day_report_cards (
 -- Live National Weather Service warnings, refreshed by a scheduled job.
 -- `intensity` is what the game reads: a Warning is a real event, a Watch is a
 -- nudge, an Advisory is only a tint. Without the tiering a single 34-county
--- Flood Watch would put most of West Virginia into full storm mode at once.
+-- Flood Watch would put most of the state into full storm mode at once.
 create table if not exists alerts (
   id         text primary key,
   event      text    not null,
@@ -563,8 +563,8 @@ end $$;
  * Morning standup. Idempotent per report day: the first call books the streak
  * and the stipend, later calls just report what today already looks like.
  *
- * The streak counts report days, not calendar days, because WVDOH does not file
- * on weekends -- a Monday login after a Friday close is unbroken service.
+ * The streak counts report days rather than calendar days, and tolerates a gap
+ * of up to three, so a long weekend away does not wipe out a run.
  */
 create or replace function daily_checkin()
 returns jsonb
@@ -1431,12 +1431,12 @@ end $$;
 
 -- Live incidents ride on real route geometry: a random scheduled work order
 -- donates one of its segments, so a rock slide lands on a road that actually
--- exists at a milepoint WVDOT actually reports.
+-- exists, at a milepoint on that road.
 --
--- When the National Weather Service has West Virginia counties under a warning,
+-- When the National Weather Service has counties under a warning,
 -- incidents concentrate there, take their character from the weather, and pay
 -- double. Winter warnings put them on plow priority: interstates first, then US
--- routes, then WV routes -- the order WVDOH actually clears in.
+-- routes, then state routes -- normal plow priority.
 create or replace function spawn_incident()
 returns text
 language plpgsql security definer set search_path = public
@@ -1658,7 +1658,7 @@ begin
 end $$;
 
 -- Freeze yesterday's standings and zero everyone's daily score. Called by the
--- ingest job when WV511 posts a new reporting date.
+-- generator when a new day's board is published.
 create or replace function roll_day(p_new_date date)
 returns void
 language plpgsql security definer set search_path = public

@@ -1,4 +1,4 @@
-/* WVDOT Roadworks — static client. Supabase is the only backend.
+/* Roadworks — static client. Supabase is the only backend.
  *
  * There is no game server and no tick. Postgres stores each job's banked
  * progress plus the instant it was banked; between Realtime events this file
@@ -8,7 +8,7 @@
  */
 (() => {
   const $ = (id) => document.getElementById(id);
-  const CFG = window.WVDOT_CONFIG || {};
+  const CFG = window.ROADWORKS_CONFIG || {};
 
   if (!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('YOUR-PROJECT-REF')) {
     $('bootStatus').innerHTML =
@@ -72,7 +72,7 @@
   const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([38.85, -80.4], 8);
   L.tileLayer('https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     maxZoom: 19,
-    attribution: '&copy; OpenStreetMap, &copy; CARTO | work orders: WV511 | routes: WVDOT GIS | driving: OSRM'
+    attribution: '&copy; OpenStreetMap, &copy; CARTO | roads: public state GIS | driving: OSRM'
   }).addTo(map);
 
   // County storm tints belong under the work orders and garages. A dedicated
@@ -225,7 +225,7 @@
     const { data: day } = await sb.from('game_day')
       .select('*').order('report_date', { ascending: false }).limit(1).maybeSingle();
     if (!day) {
-      setBoot('No road report has been ingested yet. Run the ingest job (Actions → “Ingest WV511 daily road report”).');
+      setBoot('No road report has been ingested yet. Run the ingest job (Actions → “Ingest daily road report”).');
       return;
     }
     state.reportDate = day.report_date;
@@ -501,8 +501,8 @@
     btn.disabled = false;
     if (!r) return;
     state.me = Array.isArray(r) ? r[0] : r;
-    localStorage.setItem('wvdot.name', state.me.name);
-    localStorage.setItem('wvdot.county', state.me.county);
+    localStorage.setItem('roadworks.name', state.me.name);
+    localStorage.setItem('roadworks.county', state.me.county);
     $('boot').hidden = true;
     if (state.me.home) map.setView([state.me.home[1], state.me.home[0]], 9);
     await standup();
@@ -624,7 +624,7 @@
   const jobColor = (j) => (jobDone(j) ? '#2f9e5f' : (CATEGORY[j.category] || '#8b98a8'));
 
   /**
-   * WVDOH files several activities against the same route and milepoints - a
+   * A day's board files several activities against the same route and milepoints - a
    * litter pickup, a mowing run and a sweep over the identical stretch of US 50
    * are three separate work orders sharing one line. Drawn as-is they stack
    * exactly on top of each other, so closing one changes nothing you can see:
@@ -729,7 +729,7 @@
     );
   }
 
-  // Every WVDOT facility draws the same for now: a garage is a garage, and
+  // Every highway facility draws the same for now: a garage is a garage, and
   // ranking them by size or colour implied a hierarchy the game does not use.
   const FAC_COLOR = '#8fa6bd';
   const FAC_RADIUS = 3.5;
@@ -970,7 +970,7 @@
       .map(([k, v]) => `<div><i style="background:${v}"></i>${esc(k)}</div>`)
       .join('') +
       '<div><i style="background:#2f9e5f"></i>Closed today</div>' +
-      `<div><i style="background:${FAC_COLOR};border-radius:50%;height:7px;width:7px"></i>WVDOT garage</div>`;
+      `<div><i style="background:${FAC_COLOR};border-radius:50%;height:7px;width:7px"></i>Highway garage</div>`;
   }
 
   // -------------------------------------------------------------- animation
@@ -1319,7 +1319,7 @@
 
     $('jobCard').innerHTML = `
       <h2>${j.incident ? '⚠ ' : ''}${esc(j.activity)}</h2>
-      <div class="sub">${esc(j.category)} · ${esc(j.county)} County · WVDOH District ${j.district}</div>
+      <div class="sub">${esc(j.category)} · ${esc(j.county)} County · District ${j.district}</div>
       <dl class="kv">
         <dt>Route</dt><dd>${esc(j.route_label)} ${j.route_name ? '— ' + esc(j.route_name) : ''}</dd>
         <dt>Milepoints</dt><dd>BMP ${Number(j.bmp).toFixed(2)} → EMP ${Number(j.emp).toFixed(2)} (${j.miles} mi)</dd>
@@ -1457,9 +1457,9 @@
     const sel = $('countySelect');
     sel.innerHTML = state.counties
       .map((c) => `<option value="${esc(c.name)}">${esc(c.name)} County — D${c.district}</option>`).join('');
-    const saved = localStorage.getItem('wvdot.county');
+    const saved = localStorage.getItem('roadworks.county');
     if (saved) sel.value = saved;
-    $('nameInput').value = localStorage.getItem('wvdot.name') || '';
+    $('nameInput').value = localStorage.getItem('roadworks.name') || '';
   }
 
   function fillFilters() {

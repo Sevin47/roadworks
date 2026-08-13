@@ -5,7 +5,7 @@ import { DATA_DIR, CACHE_DIR } from './config.js';
 
 for (const d of [DATA_DIR, CACHE_DIR]) fs.mkdirSync(d, { recursive: true });
 
-const UA = 'WVDOT-Roadworks-Game/1.0 (internal fun project; contact your local county manager)';
+const UA = 'Roadworks-Game/1.0 (internal fun project; contact your local county manager)';
 
 export async function httpGet(url, { as = 'text', tries = 3, timeoutMs = 45000, body = null } = {}) {
   let lastErr;

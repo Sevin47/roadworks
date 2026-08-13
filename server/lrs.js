@@ -4,7 +4,7 @@ import { agsQuery, readJson, writeJson, pool, simplify, round5, pathLengthMi } f
 
 const COUNTY_FILE = path.join(CACHE_DIR, 'counties.json');
 
-/** WV511 route-type token -> WVDOT LRS CO_SignSystem code. */
+/** Route-type token -> LRS sign-system code in the public route network. */
 const SIGN_SYSTEM = { I: '1', US: '2', WV: '3', CO: '4', HA: '5', PK: '3', OT: '5' };
 const SIGN_FALLBACK = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
 

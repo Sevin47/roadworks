@@ -5,7 +5,7 @@ import { loadCounties, lookupCounty } from './lrs.js';
 const FACILITIES_LAYER = `${GIS_BASE}/Transportation/MapServer/4`;
 
 /**
- * Classify a WVDOT facility by name rather than by its `Type` column.
+ * Classify a highway facility by name rather than by its `Type` column.
  *
  * `Type` is misleading for our purposes: "Materials Division" covers the whole
  * maintenance organization (county headquarters, area headquarters, interstate
@@ -28,7 +28,7 @@ function classify(name, type) {
 // is a place a truck rolls out of.
 const NOT_DISPATCHABLE = new Set(['stockpile', 'lab']);
 
-/** Pull every WVDOT facility and shape it for the `facilities` table. */
+/** Pull every highway facility and shape it for the `facilities` table. */
 export async function fetchFacilities() {
   await loadCounties();
   const res = await agsQuery(FACILITIES_LAYER, {
@@ -45,14 +45,15 @@ export async function fetchFacilities() {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     if (Math.abs(lat) < 1 || Math.abs(lng) < 1) continue;
 
-    const name = String(a.Name || '').trim() || `Facility ${a.OBJECTID}`;
-    const kind = classify(name, a.Type);
+    const sourceName = String(a.Name || '').trim() || `Facility ${a.OBJECTID}`;
+    const kind = classify(sourceName, a.Type);
     const district = Number(a.District);
     const county = lookupCounty(a.County || '');
 
     out.push({
       id: String(a.OBJECTID),
-      name,
+      // Placed at the real location, but given a name of our own — see rename().
+      name: sourceName,
       kind,
       district: Number.isFinite(district) && district >= 1 && district <= 10 ? district : null,
       county: county?.name || null,
@@ -73,7 +74,57 @@ export async function fetchFacilities() {
     if (!f.district) f.dispatchable = false;
   }
 
-  return out;
+  return rename(out);
+}
+
+/**
+ * Replace every facility's published name with a generated one.
+ *
+ * The locations are public infrastructure data and worth keeping — a crew
+ * rolling out of a garage that is really there is the point. The *names* are
+ * somebody else's, so they are rebuilt from geography instead: county, district
+ * and a sequence number. Numbering is by position so it stays stable between
+ * runs rather than shuffling whenever the source ordering changes.
+ */
+function rename(facilities) {
+  const counters = new Map();
+  const next = (key) => {
+    const n = (counters.get(key) || 0) + 1;
+    counters.set(key, n);
+    return n;
+  };
+
+  const ordered = [...facilities].sort((a, b) =>
+    (a.district - b.district) || (a.lng - b.lng) || (a.lat - b.lat));
+
+  for (const f of ordered) {
+    const county = f.county || `District ${f.district}`;
+    switch (f.kind) {
+      case 'district_hq':
+        f.name = `District ${f.district} Headquarters`;
+        break;
+      case 'county_hq': {
+        const n = next(`hq:${county}`);
+        f.name = n > 1 ? `${county} County Garage ${n}` : `${county} County Garage`;
+        break;
+      }
+      case 'substation':
+        f.name = `${county} Substation ${next(`sub:${county}`)}`;
+        break;
+      case 'section':
+        f.name = `District ${f.district} Section Garage ${next(`sec:${f.district}`)}`;
+        break;
+      case 'stockpile':
+        f.name = `${county} Material Stockpile ${next(`pile:${county}`)}`;
+        break;
+      case 'lab':
+        f.name = `District ${f.district} Materials Lab`;
+        break;
+      default:
+        f.name = `${county} Equipment Shop ${next(`shop:${county}`)}`;
+    }
+  }
+  return facilities;
 }
 
 export function summarize(facilities) {

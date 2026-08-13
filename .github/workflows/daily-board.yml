@@ -1,0 +1,39 @@
+name: Generate the daily work board
+
+on:
+  schedule:
+    # Early morning Eastern, then a mid-morning retry in case the first run
+    # hit a transient GIS failure.
+    - cron: '20 09 * * *'
+    - cron: '20 13 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Board date (YYYY-MM-DD). Blank means today.'
+        required: false
+
+concurrency:
+  group: board
+  cancel-in-progress: false
+
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Build the board and push it to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then
+            node ingest/generate.js --date=${{ inputs.date }}
+          else
+            node ingest/generate.js
+          fi

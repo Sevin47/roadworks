@@ -1,5 +1,5 @@
 /**
- * Pull active National Weather Service alerts for West Virginia into Supabase.
+ * Pull active National Weather Service alerts for the play area into Supabase.
  *
  * Free, no API key. Runs on a short schedule; the game reads the `alerts` table
  * to decide where incidents spawn, what kind they are, and what they pay.
@@ -13,7 +13,7 @@ const DRY = process.argv.includes('--dry-run');
 const URL = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 const FEED = 'https://api.weather.gov/alerts/active?area=WV';
-const UA = 'WVDOT-Roadworks-Game (github.com/Sevin47/wvdot-roadworks)';
+const UA = 'Roadworks-Game (github.com/Sevin47/roadworks)';
 
 if (!DRY && !(URL && KEY)) {
   console.error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or pass --dry-run).');
@@ -34,7 +34,7 @@ function classify(event) {
 /**
  * A Warning is a real event, a Watch is a nudge, an Advisory is only a tint.
  * Without this tiering one 34-county Flood Watch — which is exactly what NWS had
- * out over West Virginia the day this was written — would drop most of the state
+ * out over the state the day this was written — would drop most of the state
  * into full storm mode at once.
  */
 function intensity(event) {

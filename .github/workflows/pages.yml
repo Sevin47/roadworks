@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
           cat > _site/config.js <<EOF
-          window.WVDOT_CONFIG = {
+          window.ROADWORKS_CONFIG = {
             SUPABASE_URL: '${SUPABASE_URL}',
             SUPABASE_ANON_KEY: '${SUPABASE_ANON_KEY}'
           };
