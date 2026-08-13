@@ -528,8 +528,11 @@
       .then((r) => r.data).catch(() => null);
     if (hit) return { coords: hit.coords, secs: Number(hit.drive_secs), cached: true };
     try {
+      // `full` rather than `simplified`: simplified returns a point roughly
+      // every 500m, and a truck interpolating between those cuts straight
+      // across whatever the road was going around. Full is ~66m.
       const url = `${OSRM}/${fac.lng},${fac.lat};${job.centroid[0]},${job.centroid[1]}` +
-                  '?overview=simplified&geometries=geojson';
+                  '?overview=full&geometries=geojson';
       const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
       const d = await res.json();
       if (d.code !== 'Ok' || !d.routes?.length) return null;

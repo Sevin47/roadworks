@@ -885,10 +885,13 @@ begin
     -- Job done: the crews load up and drive back to the garage they came from.
     -- The return leg runs at 60% of the outbound trip - an empty truck with
     -- nothing to set up - and the crew is unavailable until it arrives.
+    -- The drive home takes about as long as the drive out; it is the same road.
+    -- Only the loading and setup are saved, so 90% rather than the 60% this
+    -- used to be, and it honours the same bounds as an outbound trip.
     update crews
        set return_from = v_now,
-           return_at = v_now + make_interval(secs => greatest(6, least(45,
-             extract(epoch from (arrives_at - dispatched_at)) * 0.6))),
+           return_at = v_now + make_interval(secs => greatest(8, least(75,
+             extract(epoch from (arrives_at - dispatched_at)) * 0.9))),
            boost_until = null,
            convoy = false
      where job_id = p_job and contractor_until is null and return_at is null;

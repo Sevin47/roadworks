@@ -71,7 +71,9 @@ export async function buildRouteLibrary({ onProgress } = {}) {
       returnGeometry: 'true',
       returnM: 'true',
       outSR: '4326',
-      maxAllowableOffset: '0.0004',
+      // ~3m. At the previous 45m a work zone visibly cut the corners off any
+      // winding road, which is most of them here.
+      maxAllowableOffset: '0.00003',
       geometryPrecision: '5',
       resultRecordCount: String(t.take * 3)
     });

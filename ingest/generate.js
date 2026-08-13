@@ -19,7 +19,7 @@ import { CATEGORY, DEFAULT_CATEGORY } from '../server/config.js';
 import {
   makeRng, pick, pickActivity, pickDetail, pickShift, winterWeight
 } from '../server/activities.js';
-import { pathLengthMi, hashId, round5 } from '../server/util.js';
+import { pathLengthMi, hashId, round5, simplify } from '../server/util.js';
 
 const DRY = process.argv.includes('--dry-run');
 const DATE_ARG = (process.argv.find((a) => a.startsWith('--date=')) || '').split('=')[1];
@@ -71,8 +71,12 @@ function buildBoard(reportDate, lib) {
       const emp = Math.min(route.m1, bmp + length);
       if (emp - bmp < 0.05) continue;
 
-      const coords = clipMeasured(route.pts, bmp, emp);
+      let coords = clipMeasured(route.pts, bmp, emp);
       if (coords.length < 2) continue;
+      // Centrelines are sampled finely enough to follow a winding road; a very
+      // long work zone still should not ship hundreds of vertices to every
+      // client, so thin the tail end without losing the shape.
+      if (coords.length > 200) coords = simplify(coords, 0.00002, 200);
 
       // Don't file the same activity twice on the same stretch.
       const dedupe = `${county.code}|${route.routeType}|${route.routeNumber}|${act.name}|${bmp.toFixed(1)}`;
