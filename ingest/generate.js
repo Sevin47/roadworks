@@ -210,6 +210,15 @@ async function main() {
   const { data: marked } = await db.rpc('mark_milestone_jobs', { p_date: reportDate });
   console.log(`\n  ${marked ?? 0} milestone job(s) flagged`);
 
+  // Cached driving routes are keyed to a garage and a job. Re-running a board
+  // keeps the same job ids, so without this an old route survives a change to
+  // how routes are requested — which is how a set of coarse ones outlived the
+  // switch to full-detail geometry. They cost one lookup each to refetch.
+  const { count: dropped } = await db.from('route_cache')
+    .select('*', { count: 'exact', head: true });
+  await must(db.from('route_cache').delete().neq('job_id', ''), 'clear route cache');
+  if (dropped) console.log(`  cleared ${dropped} cached driving route(s)`);
+
   // Older boards have already been archived by roll_day, and leaving them
   // resident means yesterday's work orders keep answering queries. Deleting the
   // day cascades its jobs, state, crews and contributions; day_scores and the
