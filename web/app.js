@@ -352,15 +352,18 @@
   function subscribe() {
     sb.channel('roadworks')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'job_state' },
-        (p) => { if (p.new?.job_id) applyJobState(p.new); })
+        (p) => { if (p.new?.job_id) applyJobState(mergeRow(state.stateById.get(p.new.job_id), p.new)); })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'jobs' },
         (p) => { state.jobs.set(p.new.id, p.new); indexStacks(); renderAll(); })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'jobs' },
         (p) => removeJob(p.old?.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'crews' },
         (p) => {
-          if (p.eventType === 'DELETE') { if (p.old?.id) { state.crews.delete(p.old.id); dropRoute(p.old.id); } }
-          else state.crews.set(p.new.id, p.new);
+          if (p.eventType === 'DELETE') {
+            if (p.old?.id) { state.crews.delete(p.old.id); dropRoute(p.old.id); }
+          } else {
+            state.crews.set(p.new.id, mergeRow(state.crews.get(p.new.id), p.new));
+          }
           renderAll();
         })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'feed' },
@@ -371,6 +374,27 @@
         el.style.color = live ? 'var(--good)' : 'var(--bad)';
         el.title = live ? 'Live' : `Realtime: ${status}`;
       });
+  }
+
+  /**
+   * Fold a Realtime payload onto the row we already hold.
+   *
+   * Postgres leaves unchanged TOASTed values out of UPDATE messages in logical
+   * replication, so a large column simply is not present. A crew's driving
+   * route is well past the TOAST threshold, and the update that sends a crew
+   * home only touches timestamps — so `route` arrived as undefined, replacing
+   * the good row wiped it, and the truck drove home in a straight line while
+   * the outbound leg (an INSERT, which carries everything) looked fine.
+   *
+   * Merging rather than replacing keeps whatever the message omitted.
+   */
+  function mergeRow(prev, next) {
+    if (!prev) return next;
+    const out = { ...prev };
+    for (const k of Object.keys(next)) {
+      if (next[k] !== undefined) out[k] = next[k];
+    }
+    return out;
   }
 
   function applyJobState(s) {
@@ -899,14 +923,18 @@
       }
       const html = crewMarkerHtml(phase, heading, mineCrew, !!c.contractor_until, boosted);
 
-      // The road the crew is actually driving, shown while it drives.
-      if (route && mineCrew && !homeward && t < 1) {
+      // The road the crew is actually on, out and back.
+      if (route && mineCrew && (homeward || t < 1)) {
         let rl = layers.routes.get(c.id);
         if (!rl) {
           rl = L.polyline(route.map((p) => [p[1], p[0]]),
             { color: '#ffb703', weight: 2, opacity: 0.55, dashArray: '4,6' }).addTo(map);
           layers.routes.set(c.id, rl);
         }
+        const style = homeward
+          ? { color: '#8b98a8', opacity: 0.35, dashArray: '2,6' }
+          : { color: '#ffb703', opacity: 0.55, dashArray: '4,6' };
+        if (rl._homeward !== homeward) { rl.setStyle(style); rl._homeward = homeward; }
       } else dropRoute(c.id);
 
       let mk = layers.crews.get(c.id);
