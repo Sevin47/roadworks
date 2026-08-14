@@ -1714,9 +1714,12 @@ begin
   -- These carry WHERE clauses because Supabase refuses an unqualified UPDATE or
   -- DELETE outright: without them roll_day() raised "UPDATE requires a WHERE
   -- clause" and the whole day rollover failed silently every morning.
+  -- Only managers still on an older day. Dropping the `or day_xp <> 0` matters:
+  -- with it, calling this twice in one day zeroed the score of anyone who had
+  -- already been working, which made the whole function unsafe to retry.
   update players
      set day_xp = 0, day_date = p_new_date
-   where day_date is distinct from p_new_date or day_xp <> 0;
+   where day_date is distinct from p_new_date;
 
   -- A manager who skipped more than three calendar days has broken their run.
   update players set streak = 0
