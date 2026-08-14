@@ -59,7 +59,8 @@
     hydrated: false,      // suppresses toasts while the backlog is replayed
     cardSig: null,
     crewSig: null,
-    stacks: new Map(),    // jobId -> {i, n} position within a shared-geometry group
+    stacks: new Map(),      // jobId -> {i, n, key} lane within its road group
+    routeGroups: new Map(), // county|route -> ordered job ids
     zoomKey: 0,
     busy: false
   };
@@ -642,6 +643,21 @@
    * which is exactly what happened when the map read st.done and the card was
    * computing progress itself.
    */
+  /** Every order on the same county road, in milepoint order. */
+  function routeSiblings(id) {
+    const key = state.stacks.get(id)?.key;
+    const ids = key && state.routeGroups.get(key);
+    return ids && ids.length > 1 ? ids.filter((x) => state.jobs.has(x)) : null;
+  }
+
+  function cycleStack(dir) {
+    const sib = routeSiblings(state.selected);
+    if (!sib || sib.length < 2) return;
+    const i = sib.indexOf(state.selected);
+    const next = sib[(i + dir + sib.length) % sib.length];
+    if (next && next !== state.selected) openJob(next);
+  }
+
   function jobDone(j) {
     const st = state.stateById.get(j.id);
     if (st?.done) return true;
@@ -655,30 +671,49 @@
   const jobColor = (j) => (jobDone(j) ? '#2f9e5f' : (CATEGORY[j.category] || '#8b98a8'));
 
   /**
-   * A day's board files several activities against the same route and milepoints - a
-   * litter pickup, a mowing run and a sweep over the identical stretch of US 50
-   * are three separate work orders sharing one line. Drawn as-is they stack
-   * exactly on top of each other, so closing one changes nothing you can see:
-   * the open one above it keeps its colour. Today 163 of 634 jobs sit on a
-   * shared line, the deepest stack being 11.
+   * Work orders sharing a road are drawn side by side rather than on top of
+   * each other.
    *
-   * Group them so each can be nudged onto its own parallel ribbon.
+   * Grouping by identical geometry was too narrow: on a generated board only a
+   * couple of segments match exactly, while 260 orders share a county and route
+   * and 87 of those groups genuinely overlap in milepoints. Two jobs covering
+   * MP 0.3-1.3 and MP 0.9-1.4 of the same road hide each other over the stretch
+   * they share, so closing one is invisible and clicking the one underneath is
+   * impossible.
    */
   function indexStacks() {
     const groups = new Map();
     for (const j of state.jobs.values()) {
       if (!Array.isArray(j.coords) || j.coords.length < 2) continue;
-      const a = j.coords[0];
-      const b = j.coords[j.coords.length - 1];
-      const key = `${j.coords.length}|${a[0]},${a[1]}|${b[0]},${b[1]}`;
+      const key = `${j.county_code}|${j.route_label}`;
       if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(j.id);
+      groups.get(key).push(j);
     }
+
     state.stacks = new Map();
-    for (const ids of groups.values()) {
-      // Sorted so every player sees the same order on the same road.
-      ids.sort();
-      ids.forEach((id, i) => state.stacks.set(id, { i, n: ids.length }));
+    state.routeGroups = new Map();
+
+    for (const [key, list] of groups) {
+      // Up the road, so cycling through them walks the route in order.
+      list.sort((a, b) => Number(a.bmp) - Number(b.bmp) || a.id.localeCompare(b.id));
+      state.routeGroups.set(key, list.map((j) => j.id));
+
+      // Assign each order the lowest lane whose last job ended before this one
+      // starts — ordinary interval colouring. Work that does not overlap shares
+      // a lane and stays on the true alignment; only genuinely overlapping
+      // orders get pushed onto ribbons of their own.
+      const laneEnds = [];
+      const laneOf = new Map();
+      for (const j of list) {
+        const bmp = Number(j.bmp);
+        const emp = Number(j.emp);
+        let lane = laneEnds.findIndex((end) => end <= bmp);
+        if (lane === -1) { laneEnds.push(emp); lane = laneEnds.length - 1; }
+        else laneEnds[lane] = emp;
+        laneOf.set(j.id, lane);
+      }
+      const n = Math.max(1, laneEnds.length);
+      for (const j of list) state.stacks.set(j.id, { i: laneOf.get(j.id), n, key });
     }
   }
 
@@ -1306,6 +1341,7 @@
       myCrew?.boost_until && Date.parse(myCrew.boost_until) > now ? 1 : 0,
       working >= (j.min_crews || 1) ? 1 : 0,
       jobCrews.map((c) => c.player_name).sort().join(','),
+      (routeSiblings(j.id) || []).length,
       state.me?.funds
     ].join('~');
   }
@@ -1358,7 +1394,16 @@
     const driving = myCrew && Date.parse(myCrew.arrives_at) > now;
     const boosted = myCrew?.boost_until && Date.parse(myCrew.boost_until) > now;
 
+    const sib = routeSiblings(j.id);
+    const sibIdx = sib ? sib.indexOf(j.id) : -1;
+
     $('jobCard').innerHTML = `
+      ${sib ? `<div class="stacknav">
+        <button class="ghost tiny" data-stack="-1" title="Previous order on this road">←</button>
+        <span>Order <b>${sibIdx + 1}</b> of <b>${sib.length}</b> on ${esc(j.route_label)}
+          — ${esc(j.county)} Co.</span>
+        <button class="ghost tiny" data-stack="1" title="Next order on this road">→</button>
+      </div>` : ''}
       <h2>${j.incident ? '⚠ ' : ''}${esc(j.activity)}</h2>
       <div class="sub">${esc(j.category)} · ${esc(j.county)} County · District ${j.district}</div>
       <dl class="kv">
@@ -1535,6 +1580,8 @@
     if (rec) return recall(rec.dataset.recall);
     const rad = e.target.closest('[data-radio]');
     if (rad) { rad.disabled = true; return radioPing(rad.dataset.radio); }
+    const nav = e.target.closest('[data-stack]');
+    if (nav) return cycleStack(Number(nav.dataset.stack));
     if (e.target.closest('[data-close]') || e.target.id === 'jobModal') return closeJob();
     const jobEl = e.target.closest('[data-job]');
     if (jobEl) { e.preventDefault(); return openJob(jobEl.dataset.job); }
@@ -1542,6 +1589,9 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closeJob(); $('garageModal').hidden = true; }
+    if (!state.selected || $('jobModal').hidden) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); cycleStack(-1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); cycleStack(1); }
   });
 
   for (const id of ['search', 'districtFilter', 'catFilter', 'hideDone', 'onlyMine']) {
