@@ -2,10 +2,17 @@ name: Generate the daily work board
 
 on:
   schedule:
-    # Early morning Eastern, then a mid-morning retry in case the first run
-    # hit a transient GIS failure.
-    - cron: '20 09 * * *'
-    - cron: '20 13 * * *'
+    # GitHub cron is UTC and does not follow daylight saving, and its scheduler
+    # regularly fires 10-30 minutes late under load. So rather than aim at one
+    # time, the board is built repeatedly through the early morning: whichever
+    # run lands first publishes, and the rest are cheap no-ops. Generation is
+    # seeded by the date, so re-running produces the identical board.
+    - cron: '5 8 * * *'     # ~4am ET
+    - cron: '5 9 * * *'
+    - cron: '5 10 * * *'    # ~6am EDT
+    - cron: '5 11 * * *'    # ~6am EST
+    - cron: '5 13 * * *'
+    - cron: '5 16 * * *'    # last resort
   workflow_dispatch:
     inputs:
       date:

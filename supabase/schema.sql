@@ -19,8 +19,15 @@ create table if not exists game_day (
   loaded_at     timestamptz not null default now(),
   rows_parsed   integer     not null default 0,
   rows_located  integer     not null default 0,
-  sources       jsonb       not null default '[]'::jsonb
+  sources       jsonb       not null default '[]'::jsonb,
+  -- Jobs reference game_day, so the day row has to exist before its work can be
+  -- written. This flag is what the client keys off instead: a board that failed
+  -- part way through is never shown, it just stays on yesterday's.
+  published     boolean     not null default false
 );
+
+alter table game_day add column if not exists published boolean not null default false;
+update game_day set published = true where published = false;
 
 -- The immutable half of a work order. Written once a day by the ingest job and
 -- never touched again, so clients can load it once and cache it.
@@ -1704,11 +1711,18 @@ begin
       set day_xp = excluded.day_xp, jobs_done = excluded.jobs_done;
   end if;
 
-  update players set day_xp = 0, day_date = p_new_date;
+  -- These carry WHERE clauses because Supabase refuses an unqualified UPDATE or
+  -- DELETE outright: without them roll_day() raised "UPDATE requires a WHERE
+  -- clause" and the whole day rollover failed silently every morning.
+  update players
+     set day_xp = 0, day_date = p_new_date
+   where day_date is distinct from p_new_date or day_xp <> 0;
+
   -- A manager who skipped more than three calendar days has broken their run.
   update players set streak = 0
    where last_login is null or p_new_date - last_login > 3;
-  delete from crews;
+
+  delete from crews where id is not null;
   insert into feed (report_date, kind, body)
   values (p_new_date, 'system', 'A new daily road report posted - the board has reset.');
 end $$;

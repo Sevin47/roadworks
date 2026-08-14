@@ -174,18 +174,21 @@ async function main() {
     .select('report_date').order('report_date', { ascending: false }).limit(1);
   const previous = existing?.[0]?.report_date || null;
 
+  // Staged, not published. Jobs reference game_day so the row must exist first,
+  // but nothing shows it to a player until the work is actually in place — a run
+  // that dies half way through used to leave a board advertising 701 orders and
+  // holding none, and the client dutifully displayed the empty day.
+  const { data: already } = await db.from('game_day')
+    .select('published').eq('report_date', reportDate).maybeSingle();
+
   await must(db.from('game_day').upsert({
     report_date: reportDate,
     loaded_at: new Date().toISOString(),
     rows_parsed: jobs.length,
     rows_located: jobs.length,
-    sources: []
+    sources: [],
+    published: already?.published ?? false
   }, { onConflict: 'report_date' }), 'game_day');
-
-  if (previous && previous !== reportDate) {
-    console.log(`\nNew day (${previous} -> ${reportDate}); rolling over.`);
-    await must(db.rpc('roll_day', { p_new_date: reportDate }), 'roll_day');
-  }
 
   const CHUNK = 200;
   for (let i = 0; i < jobs.length; i += CHUNK) {
@@ -198,9 +201,11 @@ async function main() {
   }
 
   // Anything on today's board that this run did not generate is stale.
+  // Follow-up work opened by finishing a job is not in the generated set, so it
+  // has to be excluded here or a re-run during the day would delete it.
   const keep = new Set(jobs.map((j) => j.id));
   const { data: stale } = await db.from('jobs')
-    .select('id').eq('report_date', reportDate).eq('incident', false);
+    .select('id').eq('report_date', reportDate).eq('incident', false).is('parent_id', null);
   const drop = (stale || []).map((r) => r.id).filter((id) => !keep.has(id));
   for (let i = 0; i < drop.length; i += 200) {
     await must(db.from('jobs').delete().in('id', drop.slice(i, i + 200)), 'prune');
@@ -214,10 +219,24 @@ async function main() {
   // keeps the same job ids, so without this an old route survives a change to
   // how routes are requested — which is how a set of coarse ones outlived the
   // switch to full-detail geometry. They cost one lookup each to refetch.
-  const { count: dropped } = await db.from('route_cache')
-    .select('*', { count: 'exact', head: true });
-  await must(db.from('route_cache').delete().neq('job_id', ''), 'clear route cache');
-  if (dropped) console.log(`  cleared ${dropped} cached driving route(s)`);
+  // Only when the board actually changed. This job now runs several times a
+  // morning so the first one to succeed wins; the later ones must not keep
+  // throwing away routes players are already driving.
+  if (!already?.published || previous !== reportDate) {
+    const { count: dropped } = await db.from('route_cache')
+      .select('*', { count: 'exact', head: true });
+    await must(db.from('route_cache').delete().neq('job_id', ''), 'clear route cache');
+    if (dropped) console.log(`  cleared ${dropped} cached driving route(s)`);
+  }
+
+  // The board is real now: bank yesterday's standings, then make it visible.
+  if (previous && previous !== reportDate) {
+    console.log(`\n  new day (${previous} -> ${reportDate}); rolling over`);
+    await must(db.rpc('roll_day', { p_new_date: reportDate }), 'roll_day');
+  }
+  await must(db.from('game_day').update({ published: true })
+    .eq('report_date', reportDate), 'publish');
+  console.log(`  published ${reportDate}`);
 
   // Older boards have already been archived by roll_day, and leaving them
   // resident means yesterday's work orders keep answering queries. Deleting the

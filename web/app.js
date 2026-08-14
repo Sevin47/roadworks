@@ -223,10 +223,13 @@
     const { data: srv } = await sb.rpc('server_now');
     if (srv) state.skewMs = Date.parse(srv) - (Date.now() - (Date.now() - t0) / 2);
 
+    // Only a published board. A day that failed part way through exists as a
+    // row with no work orders behind it; showing it would blank the map.
     const { data: day } = await sb.from('game_day')
-      .select('*').order('report_date', { ascending: false }).limit(1).maybeSingle();
+      .select('*').eq('published', true)
+      .order('report_date', { ascending: false }).limit(1).maybeSingle();
     if (!day) {
-      setBoot('No road report has been ingested yet. Run the ingest job (Actions → “Ingest daily road report”).');
+      setBoot('No work board has been published yet. Run the board job from the Actions tab.');
       return;
     }
     state.reportDate = day.report_date;
