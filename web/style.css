@@ -78,9 +78,29 @@ main { flex: 1; display: grid; grid-template-columns: 290px 1fr 340px; min-heigh
 .legend {
   position: absolute; top: 10px; right: 10px; z-index: 500;
   background: rgba(13,17,23,.88); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 8px 10px; font-size: 11px; display: grid; gap: 4px;
+  font-size: 11px; overflow: hidden; max-width: 220px;
 }
-.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.legend-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; background: none; border: 0; cursor: pointer;
+  padding: 7px 10px; color: var(--dim);
+  font-size: 10px; text-transform: uppercase; letter-spacing: .09em;
+}
+.legend-head:hover { color: var(--txt); }
+.legend-head i { font-style: normal; transition: transform .18s; }
+.legend.collapsed .legend-head i { transform: rotate(-90deg); }
+.legend.collapsed .legend-body { display: none; }
+.legend-body { display: grid; gap: 4px; padding: 0 10px 9px; }
+.legend-body i {
+  display: inline-block; width: 14px; height: 3px; border-radius: 2px;
+  margin-right: 6px; vertical-align: middle;
+}
+.legend-body i.swatch { height: 9px; border-radius: 2px; border: 1px solid; }
+.legend-sep {
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line);
+  color: var(--dim); text-transform: uppercase; letter-spacing: .07em; font-size: 9px;
+}
+.legend-note { color: var(--dim); font-size: 10px; padding-left: 20px; }
 
 /* -------------------------------------------------------------- me / crews */
 .me-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }

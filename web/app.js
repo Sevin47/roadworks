@@ -849,7 +849,7 @@
 
   function drawStorms() {
     if (layers.storms) map.removeLayer(layers.storms);
-    if (!state.storms.length) { layers.storms = null; renderStormBar(); return; }
+    if (!state.storms.length) { layers.storms = null; renderStormBar(); buildLegend(); return; }
     const g = L.layerGroup();
     for (const st of state.storms) {
       const county = state.counties.find((c) => c.code === st.code);
@@ -868,6 +868,7 @@
     }
     layers.storms = g.addTo(map);
     renderStormBar();
+    buildLegend();
   }
 
   function renderStormBar() {
@@ -1036,11 +1037,37 @@
   }
 
   function buildLegend() {
-    $('legend').innerHTML = Object.entries(CATEGORY)
+    const rows = Object.entries(CATEGORY)
       .map(([k, v]) => `<div><i style="background:${v}"></i>${esc(k)}</div>`)
       .join('') +
       '<div><i style="background:#2f9e5f"></i>Closed today</div>' +
       `<div><i style="background:${FAC_COLOR};border-radius:50%;height:7px;width:7px"></i>Highway garage</div>`;
+
+    // The tinted counties had nothing anywhere explaining them. Only the kinds
+    // actually in play are listed, so the legend says what is on the map now
+    // rather than everything the game can draw.
+    let storms = '';
+    const live = new Map();
+    for (const s of state.storms) {
+      const prev = live.get(s.kind);
+      if (!prev || s.level > prev) live.set(s.kind, s.level);
+    }
+    if (live.size) {
+      storms = '<div class="legend-sep">Weather (live alerts)</div>' +
+        [...live.entries()].map(([kind, level]) => {
+          const sty = STORM_STYLE[kind] || STORM_STYLE.other;
+          const n = state.storms.filter((s) => s.kind === kind).length;
+          return `<div title="Incidents concentrate here and pay double XP">` +
+                 `<i class="swatch" style="background:${sty.color}33;border-color:${sty.color}"></i>` +
+                 `${esc(sty.label)} county${n === 1 ? '' : ' ×' + n}</div>`;
+        }).join('') +
+        (state.storms.some((s) => s.level >= 2)
+          ? '<div class="legend-note">Solid outline = warning · faint = watch</div>'
+          : '<div class="legend-note">Faint outline = watch</div>') +
+        '<div class="legend-note">Storm work pays double XP</div>';
+    }
+
+    $('legendBody').innerHTML = rows + storms;
   }
 
   // -------------------------------------------------------------- animation
@@ -1586,6 +1613,15 @@
     const jobEl = e.target.closest('[data-job]');
     if (jobEl) { e.preventDefault(); return openJob(jobEl.dataset.job); }
   });
+
+  function setLegendOpen(open) {
+    $('legend').classList.toggle('collapsed', !open);
+    $('legendToggle').setAttribute('aria-expanded', String(open));
+    localStorage.setItem('roadworks.legend', open ? 'open' : 'shut');
+  }
+  $('legendToggle').addEventListener('click', () =>
+    setLegendOpen($('legend').classList.contains('collapsed')));
+  setLegendOpen(localStorage.getItem('roadworks.legend') !== 'shut');
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closeJob(); $('garageModal').hidden = true; }
