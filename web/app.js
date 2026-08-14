@@ -1008,8 +1008,14 @@
   function animate() {
     renderCrewMarkers();
     let touched = false;
-    for (const [id, st] of state.stateById) {
-      if (st.done || !st.crew_count) continue;
+    // Driven from the crews we actually hold rather than job_state.crew_count.
+    // That counter can lag the truth, and when it read 0 this loop skipped the
+    // job entirely - so a crew standing at 100% was never asked to settle.
+    const active = new Set([...state.crews.values()]
+      .filter((c) => !c.return_at).map((c) => c.job_id));
+    for (const id of active) {
+      const st = state.stateById.get(id);
+      if (!st || st.done) continue;
       const { progress, done } = liveProgress(id);
       const job = state.jobs.get(id);
       const bar = document.querySelector(`#jobList [data-job="${cssEsc(id)}"] .pfill`);

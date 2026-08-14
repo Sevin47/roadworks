@@ -825,8 +825,15 @@ begin
     end loop;
   end if;
 
+  -- Assigned crews, not crews already on site.
+  --
+  -- dispatch_crew increments this the moment a crew rolls, while it is still
+  -- driving. Counting only arrivals here meant that settling a job during any
+  -- crew's drive wrote crew_count = 0 - and the minute sweep, which only looks
+  -- at jobs with crew_count > 0, then skipped that job forever. The crew worked
+  -- at 100% and nothing ever closed it.
   select count(*) into v_n from crews
-   where job_id = p_job and arrives_at <= v_now and return_at is null;
+   where job_id = p_job and return_at is null;
 
   if v_st.progress >= v_job.effort then
     -- ------------------------------------------------------------- payout
@@ -1397,8 +1404,14 @@ language plpgsql security definer set search_path = public
 as $$
 declare v_id text; v_n integer := 0;
 begin
+  -- Driven from the crews table rather than job_state.crew_count: a counter
+  -- that drifts out of step must not be able to strand a job.
   for v_id in
-    select s.job_id from job_state s where not s.done and s.crew_count > 0 limit 500
+    select distinct c.job_id
+      from crews c
+      join job_state s on s.job_id = c.job_id
+     where not s.done and c.return_at is null
+     limit 500
   loop
     perform settle_job(v_id);
     v_n := v_n + 1;
