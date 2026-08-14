@@ -342,7 +342,11 @@
 
   function renderFocus() {
     const el = $('focusChip');
-    if (!state.focus) { el.hidden = true; return; }
+    // Belt and braces alongside the season check in current_focus(): never
+    // advertise a bonus on a category with nothing on today's board.
+    const onBoard = state.focus &&
+      [...state.jobs.values()].some((j) => j.category === state.focus);
+    if (!state.focus || !onBoard) { el.hidden = true; return; }
     el.hidden = false;
     el.innerHTML = `<b>Focus this week</b> ${esc(state.focus)} <span>+50% XP</span>`;
     el.style.borderColor = CATEGORY[state.focus] || 'var(--line)';

@@ -470,11 +470,24 @@ $$;
 -- The rotating focus category, derived from the ISO week rather than stored,
 -- so there is no scheduler to drift and no config row to go stale.
 create or replace function current_focus()
-returns text language sql stable as $$
-  select (array['Bridge','Closures','Construction Projects','Utilities/Oil & Gas',
-                'Heavy Maintenance','Winter Ops','Maintenance'])
-         [1 + (extract(week from now())::int % 7)];
-$$;
+returns text
+language plpgsql stable
+as $$
+declare
+  v_cats  text[] := array['Bridge', 'Closures', 'Construction Projects',
+                          'Utilities/Oil & Gas', 'Heavy Maintenance',
+                          'Winter Ops', 'Maintenance'];
+  v_i     integer := extract(week from now())::int % 7;
+  v_month integer := extract(month from now())::int;
+begin
+  -- Winter work is only generated from October through April. Pointing the
+  -- week's focus at Winter Ops in August advertises a bonus on work that does
+  -- not exist on the board, so roll on to the next category instead.
+  if v_cats[v_i + 1] = 'Winter Ops' and v_month between 5 and 9 then
+    v_i := (v_i + 1) % 7;
+  end if;
+  return v_cats[v_i + 1];
+end $$;
 
 -- ------------------------------------------------------------ commendations
 
