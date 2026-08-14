@@ -170,8 +170,12 @@ async function main() {
   await must(db.from('wv_counties').upsert(counties, { onConflict: 'code' }), 'counties');
   await must(db.from('facilities').upsert(facilities, { onConflict: 'id' }), 'facilities');
 
+  // The newest board *before* today. Reading the newest overall meant a failed
+  // run, which had already staged today's row, made `previous` equal today — so
+  // the rollover was skipped and everyone kept yesterday's score as today's.
   const { data: existing } = await db.from('game_day')
-    .select('report_date').order('report_date', { ascending: false }).limit(1);
+    .select('report_date').lt('report_date', reportDate)
+    .order('report_date', { ascending: false }).limit(1);
   const previous = existing?.[0]?.report_date || null;
 
   // Staged, not published. Jobs reference game_day so the row must exist first,
@@ -230,10 +234,12 @@ async function main() {
   }
 
   // The board is real now: bank yesterday's standings, then make it visible.
-  if (previous && previous !== reportDate) {
-    console.log(`\n  new day (${previous} -> ${reportDate}); rolling over`);
-    await must(db.rpc('roll_day', { p_new_date: reportDate }), 'roll_day');
-  }
+  // Called unconditionally rather than only on a detected day change — it banks
+  // whatever previous day it finds and moves anyone still sitting on an older
+  // date, so a missed rollover repairs itself on the next run instead of leaving
+  // players carrying a stale score indefinitely.
+  if (previous) console.log(`\n  rolling over from ${previous}`);
+  await must(db.rpc('roll_day', { p_new_date: reportDate }), 'roll_day');
   await must(db.from('game_day').update({ published: true })
     .eq('report_date', reportDate), 'publish');
   console.log(`  published ${reportDate}`);
