@@ -8,8 +8,25 @@ const COUNTY_FILE = path.join(CACHE_DIR, 'counties.json');
 const SIGN_SYSTEM = { I: '1', US: '2', WV: '3', CO: '4', HA: '5', PK: '3', OT: '5' };
 const SIGN_FALLBACK = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
-let counties = null;   // name(lower) -> {name, code, district, fips}
+let counties = null;   // name(lower) -> {name, code, lrsId, district, fips}
+let byLrsId = null;    // CO_CountyID -> county
 let routeCache = null; // "cc|s|nnnn|ss" -> {paths:[[ [x,y,m], ... ]]} | null
+
+/**
+ * The boundary layer and the route network do not number counties the same way.
+ *
+ * CO_CODE on WV_Counties is plain alphabetical, and tracks FIPS. CO_CountyID on
+ * the LRS follows WVDOT's own county list, which files McDowell under "Mac" and
+ * so puts it ahead of Marion. The two agree on 51 of the 55 counties and rotate
+ * these four against each other, so asking the LRS for Marion's roads (CO_CODE
+ * 24) returned McDowell's, and every work order placed on them was labelled
+ * Marion. Incidents made it obvious because they are announced statewide by
+ * county name; the ordinary orders had the same fault and nobody read them.
+ *
+ * Established by sampling route geometry for all 55 CO_CountyID values and
+ * testing it against the county polygons — these four are the only disagreement.
+ */
+const LRS_ID = { mcdowell: '24', marion: '25', marshall: '26', mason: '27' };
 
 export async function loadCounties() {
   if (counties) return counties;
@@ -36,7 +53,13 @@ export async function loadCounties() {
     await writeJson(COUNTY_FILE, { fetchedAt: new Date().toISOString(), rows });
   }
   counties = new Map();
-  for (const r of rows) counties.set(normCounty(r.name), r);
+  byLrsId = new Map();
+  for (const r of rows) {
+    const key = normCounty(r.name);
+    const c = { ...r, lrsId: LRS_ID[key] || r.code };
+    counties.set(key, c);
+    byLrsId.set(c.lrsId, c);
+  }
   return counties;
 }
 
@@ -46,6 +69,11 @@ export function countyList() {
 
 export function lookupCounty(name) {
   return counties?.get(normCounty(name)) || null;
+}
+
+/** Back from a route network CO_CountyID to the county it actually is. */
+export function countyByLrsId(id) {
+  return byLrsId?.get(String(id).padStart(2, '0')) || null;
 }
 
 /** Largest ring of a county polygon, thinned enough to draw cheaply. */
@@ -142,7 +170,7 @@ export async function getRouteGeometry(countyName, routeType, routeNumber) {
 
   const { num, sub } = splitRoute(routeNumber);
   const primary = SIGN_SYSTEM[routeType] || '4';
-  const cc = county ? county.code : '';
+  const cc = county ? county.lrsId : '';
   const key = `${cc || '*'}|${primary}|${num}|${sub}`;
   if (routeCache.has(key)) return routeCache.get(key);
 
@@ -238,14 +266,16 @@ export async function locateRow(row) {
     // the same route number, preferring counties in the reporting district.
     const wide = await getRouteGeometry(null, row.routeType, row.routeNumber);
     if (wide) {
+      // `cc` here is a route network CO_CountyID, so both the preference list
+      // and the county it settles on have to be translated, not compared raw.
       const prefer = countyList()
         .filter((c) => c.district === row.district)
-        .map((c) => c.code);
+        .map((c) => c.lrsId);
       const w = bestClip(wide.paths, lo, hi, prefer);
       if (w) {
         best = w;
         exact = true;
-        placedIn = w.cc;
+        placedIn = countyByLrsId(w.cc)?.code || null;
       }
     }
   }
