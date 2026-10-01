@@ -71,10 +71,23 @@
 
   // -------------------------------------------------------------------- map
   const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([38.85, -80.4], 8);
-  L.tileLayer('https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    maxZoom: 19,
-    attribution: '&copy; OpenStreetMap, &copy; CARTO | roads: public state GIS | driving: OSRM'
-  }).addTo(map);
+  map.attributionControl.addAttribution(
+    'counties: WVDOT GIS / WVDEP | roads: public state GIS | driving: OSRM');
+
+  // The basemap is the state's own county boundary layer, drawn as vectors in
+  // a pane where tiles would sit. The service simplifies and reprojects it
+  // server side, so the whole state comes down as one ~300 KB GeoJSON request.
+  const COUNTIES_URL = 'https://gis.transportation.wv.gov/arcgis/rest/services/Boundaries/FeatureServer/1/query' +
+    '?where=1%3D1&outFields=NAME&outSR=4326&geometryPrecision=5&maxAllowableOffset=0.0005&f=geojson';
+  map.createPane('basemap').style.zIndex = 250;
+  fetch(COUNTIES_URL)
+    .then((r) => r.json())
+    .then((gj) => L.geoJSON(gj, {
+      pane: 'basemap',
+      interactive: false,
+      style: { color: '#3a4a5c', weight: 1, fillColor: '#141c25', fillOpacity: 1 }
+    }).addTo(map))
+    .catch((err) => console.error(`county basemap failed: ${err.message}`, err));
 
   // County storm tints belong under the work orders and garages. A dedicated
   // pane below overlayPane (400) does that by z-index, rather than depending on
