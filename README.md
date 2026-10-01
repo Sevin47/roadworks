@@ -16,12 +16,16 @@ weather; nothing has to stay running in between.
 | --- | --- |
 | **The roads** | Real. Measured public state GIS centrelines, so a work zone sits at genuine milepoints on a road that actually exists, and a crew drives an actual route to reach it. |
 | **The garages** | Real locations, invented names. Facility points come from public infrastructure data — a crew rolling out of a garage that is really there is the whole appeal — but each is renamed from its geography (`Kanawha County Garage`, `District 4 Section Garage 2`). |
-| **The weather** | Real. Live National Weather Service alerts drive storm mode. |
+| **The weather** | Real. The morning's National Weather Service alerts decide the board's weather work, and live alerts drive storm mode through the day. |
 | **The work** | Invented. Activities come from a generic maintenance catalogue, placed at generated milepoints on generated shifts. Nothing is copied from anyone's published schedule. |
 
 The board is seeded from the date, so a given day always generates the same
-board no matter how many times the job runs — but every day is different, and
-the mix shifts with the season.
+board no matter how many times the job runs — but every day is different. There
+is no seasonal mix: snow and ice control, flood response and storm cleanup only
+appear in counties NWS has a winter, flood, wind or thunderstorm alert out for
+when the board is built. A Watch brings prep work (brine, ditch and culvert
+clearing), an Advisory or Warning brings the response itself, and Watches and
+Warnings pay the storm bonus. Agricultural frost and freeze alerts are ignored.
 
 This is an unofficial hobby project and is not affiliated with, endorsed by, or
 a product of any transportation agency. It reads public open-data endpoints

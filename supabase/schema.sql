@@ -485,12 +485,15 @@ declare
                           'Utilities/Oil & Gas', 'Heavy Maintenance',
                           'Winter Ops', 'Maintenance'];
   v_i     integer := extract(week from now())::int % 7;
-  v_month integer := extract(month from now())::int;
 begin
-  -- Winter work is only generated from October through April. Pointing the
-  -- week's focus at Winter Ops in August advertises a bonus on work that does
-  -- not exist on the board, so roll on to the next category instead.
-  if v_cats[v_i + 1] = 'Winter Ops' and v_month between 5 and 9 then
+  -- Winter work only exists when NWS has winter weather out over the state, so
+  -- pointing the week's focus at it on a dry board advertises a bonus on work
+  -- nobody can do. Roll on to the next category unless the current board
+  -- actually has some.
+  if v_cats[v_i + 1] = 'Winter Ops' and not exists (
+       select 1 from jobs j
+        where j.category = 'Winter Ops'
+          and j.report_date = (select max(report_date) from game_day where published)) then
     v_i := (v_i + 1) % 7;
   end if;
   return v_cats[v_i + 1];

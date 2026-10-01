@@ -8,74 +8,17 @@
  *   node ingest/weather.js --dry-run  # print what would be written
  */
 import { createClient } from '@supabase/supabase-js';
+import { fetchAlerts } from '../server/nws.js';
 
 const DRY = process.argv.includes('--dry-run');
 const URL = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
-const FEED = 'https://api.weather.gov/alerts/active?area=WV';
-const UA = 'Roadworks-Game (github.com/Sevin47/roadworks)';
 
 if (!DRY && !(URL && KEY)) {
   console.error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or pass --dry-run).');
   process.exit(1);
 }
 const db = DRY ? null : createClient(URL, KEY, { auth: { persistSession: false } });
-
-/** Which flavour of storm this is, which decides the incidents it spawns. */
-function classify(event) {
-  const e = String(event || '').toLowerCase();
-  if (/winter|snow|ice|blizzard|freez|sleet|wind chill|extreme cold|frost/.test(e)) return 'winter';
-  if (/flood|hydrologic/.test(e)) return 'flood';
-  if (/wind/.test(e)) return 'wind';
-  if (/thunderstorm|tornado|hurricane|tropical/.test(e)) return 'storm';
-  return 'other';
-}
-
-/**
- * A Warning is a real event, a Watch is a nudge, an Advisory is only a tint.
- * Without this tiering one 34-county Flood Watch — which is exactly what NWS had
- * out over the state the day this was written — would drop most of the state
- * into full storm mode at once.
- */
-function intensity(event) {
-  const e = String(event || '').toLowerCase();
-  if (e.includes('warning')) return 2;
-  if (e.includes('watch')) return 1;
-  return 0;
-}
-
-export async function fetchAlerts() {
-  const res = await fetch(FEED, { headers: { 'user-agent': UA, accept: 'application/geo+json' } });
-  if (!res.ok) throw new Error(`NWS returned HTTP ${res.status}`);
-  const body = await res.json();
-
-  const rows = [];
-  for (const f of body.features || []) {
-    const p = f.properties || {};
-    // `area=WV` also returns alerts that merely touch the state, so keep only
-    // the SAME codes in state 54 and translate them to county FIPS.
-    const fips = (p.geocode?.SAME || [])
-      .filter((c) => c.startsWith('054'))
-      .map((c) => Number(c));
-    if (!fips.length) continue;
-
-    const expires = p.ends || p.expires;
-    if (!expires || Date.parse(expires) < Date.now()) continue;
-
-    rows.push({
-      id: p.id || f.id,
-      event: p.event || 'Alert',
-      kind: classify(p.event),
-      intensity: intensity(p.event),
-      severity: p.severity || null,
-      headline: (p.headline || '').slice(0, 300) || null,
-      onset: p.onset || p.effective || null,
-      expires,
-      fips
-    });
-  }
-  return rows;
-}
 
 async function main() {
   const alerts = await fetchAlerts();

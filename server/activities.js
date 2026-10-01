@@ -61,15 +61,56 @@ export const CATALOG = [
   { name: 'Pole Replacement',            cat: 'Utilities/Oil & Gas', w: 4, len: [0.1, 0.8] },
   { name: 'Water Line Repair',           cat: 'Utilities/Oil & Gas', w: 4, len: [0.1, 1.5] },
 
-  // ----------------------------------------------------------- Winter Ops
-  // Only generated in season; see winterWeight().
-  { name: 'Snow Removal',                cat: 'Winter Ops', w: 12, len: [2, 15] },
-  { name: 'Ice Control - Salting',       cat: 'Winter Ops', w: 10, len: [2, 15] },
-  { name: 'Brine Application',           cat: 'Winter Ops', w: 8,  len: [2, 12], routes: ['I', 'US', 'WV'] },
-  { name: 'Cinder Application',          cat: 'Winter Ops', w: 7,  len: [1, 8] },
-  { name: 'Snow Fence Maintenance',      cat: 'Winter Ops', w: 3,  len: [0.2, 2] },
-  { name: 'Drift Removal',               cat: 'Winter Ops', w: 5,  len: [0.5, 6] }
+  // ------------------------------------------------------- weather response
+  // `weather` entries never appear on an ordinary board. They are only placed
+  // by weatherJobs(), in counties the National Weather Service has an alert
+  // out for that morning; see WEATHER_WORK.
+  { name: 'Snow Removal',                cat: 'Winter Ops', w: 12, len: [2, 15], weather: true },
+  { name: 'Ice Control - Salting',       cat: 'Winter Ops', w: 10, len: [2, 15], weather: true },
+  { name: 'Brine Application',           cat: 'Winter Ops', w: 8,  len: [2, 12], routes: ['I', 'US', 'WV'], weather: true },
+  { name: 'Cinder Application',          cat: 'Winter Ops', w: 7,  len: [1, 8],  weather: true },
+  { name: 'Snow Fence Maintenance',      cat: 'Winter Ops', w: 3,  len: [0.2, 2], weather: true },
+  { name: 'Drift Removal',               cat: 'Winter Ops', w: 5,  len: [0.5, 6], weather: true },
+  { name: 'High Water Patrol',           cat: 'Closures',          w: 6, len: [0.2, 2],   weather: true },
+  { name: 'Slide Removal',               cat: 'Heavy Maintenance', w: 5, len: [0.1, 0.8], weather: true },
+  { name: 'Shoulder Washout Repair',     cat: 'Heavy Maintenance', w: 4, len: [0.1, 1],   weather: true },
+  { name: 'Debris Removal',              cat: 'Maintenance',       w: 6, len: [0.2, 3],   weather: true },
+  { name: 'Downed Tree Removal',         cat: 'Maintenance',       w: 7, len: [0.1, 0.5], weather: true }
 ];
+
+/**
+ * What each kind of NWS alert puts on the board. A Watch means the weather is
+ * coming, so crews get ahead of it (`prep`); an Advisory or Warning means it is
+ * here (`active`). `per` is how many orders one county gets at each tier -
+ * advisory, watch, warning - as a [min, max] range.
+ *
+ * Kinds missing here ('other') add nothing to the board; they still drive live
+ * storm incidents through the alerts table.
+ */
+export const WEATHER_WORK = {
+  winter: {
+    prep:   ['Brine Application', 'Snow Fence Maintenance', 'Ice Control - Salting'],
+    active: ['Snow Removal', 'Ice Control - Salting', 'Cinder Application', 'Drift Removal',
+             'Brine Application'],
+    per: [[2, 3], [1, 2], [3, 5]]
+  },
+  flood: {
+    prep:   ['Ditch Cleaning', 'Culvert Cleaning', 'Drainage Repair'],
+    active: ['High Water Patrol', 'Slide Removal', 'Shoulder Washout Repair', 'Debris Removal',
+             'Road Closed - Detour'],
+    per: [[1, 2], [1, 2], [2, 4]]
+  },
+  wind: {
+    prep:   ['Brush Cutting'],
+    active: ['Downed Tree Removal', 'Debris Removal', 'Sign Replacement'],
+    per: [[1, 2], [1, 1], [2, 4]]
+  },
+  storm: {
+    prep:   ['Ditch Cleaning', 'Culvert Cleaning'],
+    active: ['Downed Tree Removal', 'Debris Removal', 'High Water Patrol', 'Drainage Repair'],
+    per: [[1, 2], [1, 1], [2, 3]]
+  }
+};
 
 /** Flavour text, picked to match the activity's category. */
 const DETAILS = {
@@ -127,18 +168,6 @@ const SHIFTS = [
   ['12:00 AM', '11:59 PM']
 ];
 
-/**
- * Winter work only appears in season, ramping up through the cold months so the
- * board changes character with the calendar rather than flipping overnight.
- */
-export function winterWeight(date) {
-  const m = date.getMonth() + 1;           // 1-12
-  if (m === 12 || m === 1 || m === 2) return 1;
-  if (m === 11 || m === 3) return 0.55;
-  if (m === 10 || m === 4) return 0.15;
-  return 0;
-}
-
 /** Deterministic pseudo-random so a given date always produces the same board. */
 export function makeRng(seed) {
   let h = 2166136261 >>> 0;
@@ -158,14 +187,20 @@ export function pick(rng, arr) {
   return arr[Math.floor(rng() * arr.length)];
 }
 
-/** Weighted choice over the catalogue, filtered to what suits this road. */
-export function pickActivity(rng, routeType, winter) {
+/**
+ * Weighted choice over the catalogue, filtered to what suits this road.
+ * `names` narrows it to a set of activities (the weather response lists);
+ * without it, weather-only work is left out. Returns null when nothing in the
+ * set suits the road.
+ */
+export function pickActivity(rng, routeType, names = null) {
   const usable = CATALOG.filter((a) => {
-    if (a.cat === 'Winter Ops' && winter <= 0) return false;
+    if (names ? !names.includes(a.name) : a.weather) return false;
     if (a.routes && !a.routes.includes(routeType)) return false;
     return true;
   });
-  const weights = usable.map((a) => (a.cat === 'Winter Ops' ? a.w * winter : a.w));
+  if (!usable.length) return null;
+  const weights = usable.map((a) => a.w);
   const total = weights.reduce((x, y) => x + y, 0);
   let r = rng() * total;
   for (let i = 0; i < usable.length; i++) {
