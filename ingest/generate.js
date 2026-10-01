@@ -317,10 +317,20 @@ async function main() {
   // Anything on today's board that this run did not generate is stale.
   // Follow-up work opened by finishing a job is not in the generated set, so it
   // has to be excluded here or a re-run during the day would delete it.
+  // Paged: the API returns at most 1000 rows a request, and a rebuild that
+  // changes the board holds the old and new orders together - well over that -
+  // so a single read silently missed the tail and left old orders on the board.
   const keep = new Set(jobs.map((j) => j.id));
-  const { data: stale } = await db.from('jobs')
-    .select('id').eq('report_date', reportDate).eq('incident', false).is('parent_id', null);
-  const drop = (stale || []).map((r) => r.id).filter((id) => !keep.has(id));
+  const stale = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db.from('jobs').select('id')
+      .eq('report_date', reportDate).eq('incident', false).is('parent_id', null)
+      .order('id').range(from, from + 999);
+    if (error) throw new Error(`read board for pruning: ${error.message}`);
+    stale.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const drop = stale.map((r) => r.id).filter((id) => !keep.has(id));
   for (let i = 0; i < drop.length; i += 200) {
     await must(db.from('jobs').delete().in('id', drop.slice(i, i + 200)), 'prune');
   }
