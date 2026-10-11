@@ -13,20 +13,14 @@ let byLrsId = null;    // CO_CountyID -> county
 let routeCache = null; // "cc|s|nnnn|ss" -> {paths:[[ [x,y,m], ... ]]} | null
 
 /**
- * The boundary layer and the route network do not number counties the same way.
- *
- * CO_CODE on WV_Counties is plain alphabetical, and tracks FIPS. CO_CountyID on
- * the LRS follows WVDOT's own county list, which files McDowell under "Mac" and
- * so puts it ahead of Marion. The two agree on 51 of the 55 counties and rotate
- * these four against each other, so asking the LRS for Marion's roads (CO_CODE
- * 24) returned McDowell's, and every work order placed on them was labelled
- * Marion. Incidents made it obvious because they are announced statewide by
- * county name; the ordinary orders had the same fault and nobody read them.
- *
- * Established by sampling route geometry for all 55 CO_CountyID values and
- * testing it against the county polygons — these four are the only disagreement.
+ * WVDOT's county numbering files McDowell under "Mac", ahead of Marion. The LRS
+ * route network (CO_CountyID) has always used it. The WV_Counties layer, which
+ * the WVU GIS Technical Center maintains, numbered these four counties
+ * alphabetically (Marion 24 ... McDowell 27) by mistake, so asking the LRS for
+ * Marion's roads returned McDowell's. The layer was fixed in October 2026. The
+ * correct codes are pinned here so a regression upstream can't renumber them.
  */
-const LRS_ID = { mcdowell: '24', marion: '25', marshall: '26', mason: '27' };
+const COUNTY_CODE = { mcdowell: '24', marion: '25', marshall: '26', mason: '27' };
 
 export async function loadCounties() {
   if (counties) return counties;
@@ -56,7 +50,8 @@ export async function loadCounties() {
   byLrsId = new Map();
   for (const r of rows) {
     const key = normCounty(r.name);
-    const c = { ...r, lrsId: LRS_ID[key] || r.code };
+    const code = COUNTY_CODE[key] || r.code;
+    const c = { ...r, code, lrsId: code };
     counties.set(key, c);
     byLrsId.set(c.lrsId, c);
   }

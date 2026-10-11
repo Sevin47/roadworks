@@ -225,10 +225,11 @@ async function must(promise, what) {
 }
 
 /**
- * Upsert the county list, coping with the state renumbering it. In October 2026
- * WVDOT reissued CO_CODE for McDowell, Marion, Marshall and Mason, and a plain
- * upsert on code then tried to give code 24 the name McDowell while the old
- * McDowell row still held it — every board after that died on the unique name.
+ * Upsert the county list, coping with codes that move between counties. When
+ * the county layer's misnumbering of McDowell, Marion, Marshall and Mason was
+ * corrected (October 2026), a plain upsert on code tried to give code 24 the
+ * name McDowell while the old McDowell row still held it, and every board after
+ * that failed on the unique name.
  * Rows whose code now belongs to someone else are dropped first, and players
  * filed under a moved county follow it to its new code.
  */

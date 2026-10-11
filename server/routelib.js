@@ -66,8 +66,7 @@ export async function buildRouteLibrary({ onProgress } = {}) {
   let done = 0;
   const results = await pool(tasks, 8, async (t) => {
     const res = await agsQuery(LRS_COUNTY_MP, {
-      // CO_CountyID, not CO_CODE — the route network and the boundary layer
-      // number four counties differently. See LRS_ID in lrs.js.
+      // CO_CountyID uses WVDOT's county numbering, pinned by COUNTY_CODE in lrs.js.
       where: `CO_CountyID='${t.county.lrsId}' AND CO_SignSystem='${t.sign}'`,
       outFields: 'CO_ROUTEID,CO_SignSystem,CO_RouteNumber,CO_SubRoute',
       returnGeometry: 'true',
