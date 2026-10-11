@@ -224,6 +224,33 @@ async function must(promise, what) {
   if (error) throw new Error(`${what}: ${error.message}`);
 }
 
+/**
+ * Upsert the county list, coping with the state renumbering it. In October 2026
+ * WVDOT reissued CO_CODE for McDowell, Marion, Marshall and Mason, and a plain
+ * upsert on code then tried to give code 24 the name McDowell while the old
+ * McDowell row still held it — every board after that died on the unique name.
+ * Rows whose code now belongs to someone else are dropped first, and players
+ * filed under a moved county follow it to its new code.
+ */
+async function syncCounties(counties) {
+  const { data: existing, error } = await db.from('wv_counties').select('code,name');
+  if (error) throw new Error(`counties: ${error.message}`);
+  const codeOf = new Map(counties.map((c) => [c.name, c.code]));
+  const nameOf = new Map(counties.map((c) => [c.code, c.name]));
+  const stale = (existing || [])
+    .filter((r) => codeOf.get(r.name) !== r.code || nameOf.get(r.code) !== r.name)
+    .map((r) => r.code);
+  if (stale.length) {
+    console.log(`counties    : renumbered, replacing ${stale.join(',')}`);
+    await must(db.from('wv_counties').delete().in('code', stale), 'counties');
+  }
+  await must(db.from('wv_counties').upsert(counties, { onConflict: 'code' }), 'counties');
+  for (const c of counties) {
+    await must(db.from('players').update({ county_code: c.code })
+      .eq('county', c.name).neq('county_code', c.code), 'players');
+  }
+}
+
 async function main() {
   const t0 = Date.now();
   await loadCounties();
@@ -280,7 +307,7 @@ async function main() {
     code: c.code, name: c.name, district: c.district,
     center: c.center, fips: c.fips, geom: c.geom
   }));
-  await must(db.from('wv_counties').upsert(counties, { onConflict: 'code' }), 'counties');
+  await syncCounties(counties);
   await must(db.from('facilities').upsert(facilities, { onConflict: 'id' }), 'facilities');
 
   // The newest board *before* today. Reading the newest overall meant a failed
